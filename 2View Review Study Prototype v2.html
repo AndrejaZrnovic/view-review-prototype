@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>View Review Study Prototype v2</title>
+<style>
+:root{--bg:#f7f7f5;--card:#fff;--tx:#1d1d1b;--mut:#6b6b66;--bd:#dcdcd6;--ac:#2a6f97;--ok:#2d7a4f;--bad:#b3392f;--warn:#b7791f;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#171716;--card:#232321;--tx:#ecece8;--mut:#9b9b94;--bd:#3a3a36;--ac:#6fb3d9;--ok:#5fbf8a;--bad:#e8776d;--warn:#e0b05a}}
+:root[data-theme="dark"]{--bg:#171716;--card:#232321;--tx:#ecece8;--mut:#9b9b94;--bd:#3a3a36;--ac:#6fb3d9;--ok:#5fbf8a;--bad:#e8776d;--warn:#e0b05a}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--tx);font:15px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}
+main{max-width:980px;margin:0 auto;padding:20px 16px 48px}
+h1{font-size:20px;margin:0 0 4px}h2{font-size:16px;margin:0 0 8px}p{margin:0 0 10px}.mut{color:var(--mut);font-size:13px}
+.bar{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:16px;font-size:12px}
+.pill{border:1px solid var(--bd);border-radius:99px;padding:2px 9px;background:var(--card);color:var(--mut)}.pill.on{background:var(--ac);color:#fff;border-color:var(--ac)}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:12px}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:10px;padding:12px;margin-bottom:12px}.grid .card{margin:0}.card.rej{opacity:.55}
+.thumb{background:var(--bg);border-radius:8px;display:flex;justify-content:center;gap:6px;padding:6px;margin-bottom:8px}.thumb{flex-wrap:wrap}.thumb svg,.thumb img{height:120px;width:auto;max-width:100%;object-fit:contain}
+.row{display:flex;gap:6px;flex-wrap:wrap;align-items:center;justify-content:space-between;margin-top:8px}
+button{font:inherit;font-size:13px;padding:5px 11px;border-radius:7px;border:1px solid var(--bd);background:var(--card);color:var(--tx);cursor:pointer}button:hover{border-color:var(--ac)}
+button.pri{background:var(--ac);color:#fff;border-color:var(--ac)}button.ok{color:var(--ok)}button.no{color:var(--bad)}
+.badge{font-size:11px;font-weight:600;padding:2px 8px;border-radius:99px;border:1px solid}.b-up{color:var(--ok)}.b-ai{color:var(--warn)}.b-ue{color:var(--ac)}
+.st{font-size:12px;color:var(--mut)}.warn{color:var(--warn);font-size:13px}.err{color:var(--bad);font-size:13px}
+.toast{background:var(--card);border:1px solid var(--ac);border-radius:8px;padding:8px 12px;margin-bottom:12px;font-size:13px}
+.cmp{display:grid;grid-template-columns:1fr 1fr;gap:12px}.cmp .thumb svg,.cmp .thumb img{height:160px}.vrow{border-top:1px solid var(--bd);padding:8px 0}.vrow img{height:48px;border-radius:4px;vertical-align:middle}
+.spec{font-size:13px;background:var(--bg);border-radius:8px;padding:8px 10px;margin-top:8px}
+input,select{font:inherit;padding:5px 8px;border-radius:7px;border:1px solid var(--bd);background:var(--card);color:var(--tx)}
+label{display:block;margin-bottom:8px}.chk{display:inline-block;margin-right:14px}
+pre{background:var(--bg);border:1px solid var(--bd);border-radius:8px;padding:10px;max-height:220px;overflow:auto;font-size:11px}
+table{border-collapse:collapse;font-size:13px;width:100%}td,th{border-bottom:1px solid var(--bd);padding:5px 6px;text-align:left}.wrap{overflow-x:auto}
+</style>
+</head>
+<body>
+<main id="app"></main>
+<script>
+/* ===== STIMULUS CONFIG: edit this block to change product, views, errors, shots ===== */
+var CODE='research'; /* researcher code: change it */
+function shuf(a){a=a.slice();for(var i=a.length-1;i>0;i--){var j=Math.floor(Math.random()*(i+1)),t=a[i];a[i]=a[j];a[j]=t}return a}
+function nextAlt(){var n=0;try{n=+localStorage.getItem('alt')||0;localStorage.setItem('alt',String(n+1))}catch(x){n=Math.floor(Math.random()*2)}return n%2?'labeled':'baseline'}
+var PRODUCT='Aqua bottle';
+var ORIG={body:'#2a6f97',cap:'#1b263b',band:'#e9ecef',capShape:'round'};
+var SHEET='Blue body, dark navy round cap, light band, circular logo on the front.';
+function sp(o){var r={kind:'side',logo:false,text:false,body:ORIG.body,cap:ORIG.cap,band:ORIG.band,capShape:ORIG.capShape};for(var k in o)r[k]=o[k];return r}
+var VIEWS=[
+ {id:'front',name:'Front',src:'uploaded',spec:sp({logo:true}),truth:sp({logo:true}),err:false},
+ {id:'left',name:'Left side',src:'uploaded',spec:sp({}),truth:sp({}),err:false},
+ {id:'back',name:'Back',src:'ai',spec:sp({text:true}),truth:sp({text:true}),err:false},
+ {id:'right',name:'Right side',src:'ai',spec:sp({cap:'#f77f00'}),truth:sp({}),err:true},
+ {id:'top',name:'Top',src:'ai',spec:sp({kind:'top',capShape:'square'}),truth:sp({kind:'top'}),err:true},
+ {id:'detail',name:'Logo detail',src:'ai',spec:sp({kind:'detail'}),truth:sp({kind:'detail'}),err:false}
+];
+var SHOTS=[{n:'Shot 1: Hero front',v:'front'},{n:'Shot 2: Turntable pass',v:'right'},{n:'Shot 3: Cap macro, top-down',v:'top'}];
+/* ===== END CONFIG ===== */
+var SAMPLE={views:VIEWS,shots:SHOTS,product:PRODUCT,sheet:SHEET};
+var CFG={custom:false,product:'My product',sheet:'',views:[{name:'Front',src:'uploaded',err:false,img:'',fix:''},{name:'Back',src:'ai',err:false,img:'',fix:''}],shots:[{n:'Shot 1',vi:0},{n:'Shot 2',vi:1}]};
+function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;')}
+function origs(){return VIEWS.filter(function(v){return v.src==='uploaded'}).map(function(v){return svg(v.truth)}).join('')}
+function stim(){return '<div class="card"><h2>Stimuli (researcher)</h2><label><input type="checkbox" data-a="custom"'+(CFG.custom?' checked':'')+'> Use my own images instead of the sample bottle</label>'+(CFG.custom?cfgForm():'<p class="mut">Using the drawn sample bottle.</p>')+'</div>'}
+function cfgForm(){var c=CFG;return '<p class="mut">Images stay in this browser tab and are lost on reload. Mark AI views that contain a planted error and add the corrected image (what the view should have looked like).</p><label>Product name<br><input data-f="product" value="'+esc(c.product)+'"></label><label>Product sheet (what the original materials say)<br><input data-f="sheet" style="width:100%" value="'+esc(c.sheet)+'"></label>'+c.views.map(function(v,i){return '<div class="vrow"><div class="row" style="margin:0 0 6px"><input data-f="name" data-i="'+i+'" value="'+esc(v.name)+'"><select data-f="src" data-i="'+i+'"><option value="uploaded"'+(v.src==='uploaded'?' selected':'')+'>Uploaded (original)</option><option value="ai"'+(v.src==='ai'?' selected':'')+'>AI-inferred</option></select><button data-a="rmview" data-i="'+i+'">Remove</button></div><div class="row" style="margin:0"><span>Image '+(v.img?'<img src="'+v.img+'" alt="">':'<span class="err">missing</span>')+'<br><input type="file" accept="image/*" data-f="img" data-i="'+i+'"></span>'+(v.src==='ai'?'<span><label style="margin:0"><input type="checkbox" data-f="err" data-i="'+i+'"'+(v.err?' checked':'')+'> Planted error</label>'+(v.err?'Corrected image '+(v.fix?'<img src="'+v.fix+'" alt="">':'<span class="err">missing</span>')+'<br><input type="file" accept="image/*" data-f="fix" data-i="'+i+'">':'')+'</span>':'')+'</div></div>'}).join('')+'<button data-a="addview">Add view</button><h2 style="margin-top:12px">Shots (each uses one view)</h2>'+c.shots.map(function(s,i){return '<div class="row" style="margin:4px 0"><input data-f="shotn" data-i="'+i+'" value="'+esc(s.n)+'"><select data-f="shotv" data-i="'+i+'">'+c.views.map(function(v,j){return '<option value="'+j+'"'+(s.vi===j?' selected':'')+'>'+esc(v.name)+'</option>'}).join('')+'</select></div>'}).join('')}
+function applyCfg(){var m=document.getElementById('msg');if(!CFG.custom){VIEWS=SAMPLE.views;SHOTS=SAMPLE.shots;PRODUCT=SAMPLE.product;SHEET=SAMPLE.sheet;return true}
+ var vs=CFG.views,er='';if(vs.length<2)er='Add at least two views.';
+ vs.forEach(function(v,i){if(!v.img)er='Every view needs an image ('+(v.name||'view '+(i+1))+').';if(v.src!=='ai')v.err=false;if(v.err&&!v.fix)er='Add a corrected image for the planted error: '+v.name+'.'});
+ if(!vs.some(function(v){return v.src==='uploaded'}))er='At least one view must be an uploaded original.';
+ if(er){m.textContent=er;return false}
+ VIEWS=vs.map(function(v,i){return {id:'v'+i,name:v.name||('View '+(i+1)),src:v.src,spec:{img:v.img},truth:{img:v.err?v.fix:v.img},err:!!v.err}});
+ SHOTS=CFG.shots.map(function(s){return {n:s.n,v:'v'+Math.min(s.vi,vs.length-1)}});PRODUCT=CFG.product;SHEET=CFG.sheet;return true}
+var STEPS=['consent','setup','tutorial','materials','review','story','quest','debrief','results'];
+var LABELS={consent:'Consent',setup:'Setup',tutorial:'Tutorial',materials:'Materials',review:'Review',story:'Storyboard',quest:'Questions',debrief:'Debrief',results:'Results'};
+var S={step:'setup',auth:false,pid:'',cond:'labeled',views:{},cmp:null,cmpStart:0,cmpMs:0,log:[],t0:Date.now(),tRev:0,revMs:0,toast:'',q:null,consent:false};
+function svg(s){if(s.img)return '<img src="'+s.img+'" alt="">';var o='<svg viewBox="0 0 120 160" xmlns="http://www.w3.org/2000/svg">';
+ if(s.kind==='top'){o+='<circle cx="60" cy="80" r="52" fill="'+s.body+'"/>'+(s.capShape==='round'?'<circle cx="60" cy="80" r="26" fill="'+s.cap+'"/>':'<rect x="36" y="56" width="48" height="48" fill="'+s.cap+'"/>')}
+ else if(s.kind==='detail'){o+='<rect x="10" y="20" width="100" height="120" rx="10" fill="'+s.body+'"/><circle cx="60" cy="80" r="34" fill="#fff"/><circle cx="60" cy="80" r="22" fill="'+s.body+'"/><circle cx="60" cy="80" r="8" fill="#fff"/>'}
+ else{o+='<rect x="40" y="8" width="40" height="18" rx="3" fill="'+s.cap+'"/><rect x="30" y="26" width="60" height="120" rx="14" fill="'+s.body+'"/><rect x="30" y="70" width="60" height="26" fill="'+s.band+'"/>';
+  if(s.logo)o+='<circle cx="60" cy="83" r="9" fill="'+s.body+'"/>';if(s.text)o+='<rect x="40" y="108" width="40" height="3" fill="#fff"/><rect x="44" y="116" width="32" height="3" fill="#fff"/>'}
+ return o+'</svg>'}
+function log(type,d){var e={t:Date.now()-S.t0,pid:S.pid,cond:S.cond,type:type};for(var k in d)e[k]=d[k];S.log.push(e)}
+function vget(id){return VIEWS.filter(function(v){return v.id===id})[0]}
+function init(){S.views={};VIEWS.forEach(function(v){S.views[v.id]={status:'pending',src:v.src,spec:v.spec,replaced:false,conf:0,cmpN:0,cmpMs:0}})}
+function badge(src){var m={uploaded:['Uploaded','b-up'],ai:['AI-inferred','b-ai'],user:['User-edited','b-ue']}[src];return '<span class="badge '+m[1]+'">'+m[0]+'</span>'}
+function impact(id){return SHOTS.filter(function(s){return s.v===id}).map(function(s){return s.n.split(':')[0]}).join(', ')}
+function nav(back,next,nl){return '<div class="row" style="margin-top:16px">'+(back?'<button data-a="go" data-to="'+back+'">Back</button>':'<span></span>')+'<button class="pri" data-a="go" data-to="'+next+'">'+(nl||'Continue')+'</button></div>'}
+/* ---------- pages ---------- */
+var P={
+consent:function(){return '<h1>Study information and consent</h1><div class="card"><p>You will review product images that an AI tool created for a video project, then answer a few short questions. This takes about 15 minutes.</p><p>The interface is a prototype. The images are pre-made and not generated live. We record your clicks and answers, not your identity. You may stop at any time.</p><label><input type="checkbox" id="cons"> I have read this and agree to take part.</label></div><button class="pri" data-a="consent">Continue</button><div id="msg" class="err"></div>'},
+setup:function(){if(!S.auth)return '<h1>Researcher access</h1><div class="card"><label>Researcher code<br><input id="code" type="password"></label></div><button class="pri" data-a="unlock">Unlock</button><div id="msg" class="err"></div>';var sel=function(v,t){return '<option value="'+v+'"'+(S.condSel===v?' selected':'')+'>'+t+'</option>'};return '<h1>Session setup</h1><div class="card"><label>Participant ID<br><input id="pid" value="'+S.pid+'"></label><label>Condition (researcher)<br><select id="cond">'+sel('alt','Alternate A/B (this device)')+sel('random','Random')+sel('baseline','A: Baseline')+sel('labeled','B: Labeled + compare + replace')+'</select></label></div>'+stim()+'<button class="pri" data-a="start">Start</button><div id="msg" class="err"></div>'},
+tutorial:function(){var L=S.cond==='labeled';return '<h1>Quick tutorial</h1><div class="card"><p>You are helping make a product video for a bottle brand. Before shots are made, the tool prepares product views from different angles. Some views come from photos you uploaded, and some were created by the AI.</p><p><strong>In this task you can:</strong></p><p>'+(L?'• See where each view came from<br>• Compare a view with your original materials<br>• Approve, reject or replace views':'• Keep or remove each view')+'<br>• Rate how confident you are in each view</p><p>Views you keep will be used to build the video shots in the next step.</p></div>'+nav('consent','materials')},
+materials:function(){return '<h1>Your original materials</h1><p class="mut">These are the photos and product sheet you uploaded. Take a moment to look at them.</p><div class="card"><div class="thumb">'+origs()+'</div><div class="spec"><strong>Product sheet ('+PRODUCT+'):</strong> '+SHEET+'</div></div>'+nav('tutorial','review','Start review')},
+review:function(){var L=S.cond==='labeled';
+ var h='<h1>Review product views</h1><p class="mut">Check the views before they are used to build your shots, then continue.</p>'+(S.toast?'<div class="toast">'+S.toast+'</div>':'')+'<div class="grid">'+VIEWS.map(function(v){var s=S.views[v.id];
+  var c='<div class="card'+(s.status==='rejected'?' rej':'')+'"><div class="thumb">'+svg(s.spec)+'</div><div class="row" style="margin-top:0"><strong>'+v.name+'</strong>'+(L?badge(s.src):'')+'</div><div class="st">'+(L?'Status: '+s.status:(s.status==='approved'?'Kept':s.status==='rejected'?'Removed':'Not decided'))+'</div><div class="row">';
+  if(L){c+='<button data-a="cmp" data-id="'+v.id+'">Compare</button><button class="ok" data-a="approve" data-id="'+v.id+'">Approve</button><button class="no" data-a="reject" data-id="'+v.id+'">Reject</button>';if(s.src!=='uploaded')c+='<button data-a="replace" data-id="'+v.id+'">Replace</button>'}
+  else c+='<button class="ok" data-a="approve" data-id="'+v.id+'">Keep</button><button class="no" data-a="reject" data-id="'+v.id+'">Remove</button>';
+  c+='</div><div class="row"><span class="st">Confidence</span><select data-a="conf" data-id="'+v.id+'"><option value="0">–</option>'+[1,2,3,4,5].map(function(n){return '<option value="'+n+'"'+(s.conf===n?' selected':'')+'>'+n+'</option>'}).join('')+'</select></div></div>';return c}).join('')+'</div>';
+ if(L&&S.cmp){var v=vget(S.cmp),s=S.views[S.cmp];h+='<div class="card" style="margin-top:12px"><h2>Compare: '+v.name+' '+badge(s.src)+'</h2><div class="cmp"><div><div class="mut">Current view</div><div class="thumb">'+svg(s.spec)+'</div></div><div><div class="mut">Your original materials</div><div class="thumb">'+origs()+'</div></div></div><div class="spec"><strong>Product sheet:</strong> '+SHEET+'</div><div class="row"><button data-a="closecmp">Close</button></div></div>'}
+ return h+'<div class="row" style="margin-top:16px"><button data-a="go" data-to="materials">Back to materials</button><button class="pri" data-a="go" data-to="story">Continue to storyboard</button></div>'},
+story:function(){var L=S.cond==='labeled';var h='<h1>Storyboard</h1><p class="mut">Each shot is built from one product view.</p><div class="grid">';
+ SHOTS.forEach(function(sh){var s=S.views[sh.v],v=vget(sh.v),b=s.status==='rejected';
+  h+='<div class="card"><strong>'+sh.n+'</strong><div class="thumb" style="margin-top:8px">'+(b?'<div style="height:120px;display:flex;align-items:center" class="err">No view available</div>':svg(s.spec))+'</div>';
+  if(L)h+='<div class="st">Built from: '+v.name+' · '+(s.src==='ai'?'AI-inferred':s.src==='user'?'User-edited':'Uploaded')+' · '+s.status+'</div>'+(s.status==='pending'?'<div class="warn">This view was not reviewed.</div>':'')+(b?'<div class="err">Blocked: source view was rejected.</div>':'');
+  h+='</div>'});
+ return h+'</div>'+nav('review','quest','Continue to questions')},
+quest:function(){var q=S.q||{ai:[]};var sel=function(n,val){return '<select id="'+n+'"><option value="">–</option>'+[1,2,3,4,5,6,7].map(function(i){return '<option value="'+i+'"'+(String(val)===String(i)?' selected':'')+'>'+i+'</option>'}).join('')+'</select>'};
+ return '<h1>A few questions</h1><div class="card"><p><strong>1.</strong> Which views do you think were created by the AI?</p>'+VIEWS.map(function(v){return '<span class="chk"><label style="display:inline"><input type="checkbox" id="qa_'+v.id+'"'+(q.ai.indexOf(v.id)>-1?' checked':'')+'> '+v.name+'</label></span>'}).join('')+'</div><div class="card"><p class="mut">Rate from 1 (strongly disagree) to 7 (strongly agree).</p><p>2. I understood how my choices would affect the video shots. '+sel('q2',q.q2)+'</p><p>3. I am confident the views I kept are accurate. '+sel('q3',q.q3)+'</p><p>4. The task required a lot of mental effort. '+sel('q4',q.q4)+'</p><p>5. Did you notice anything wrong with any view? What?<br><input id="q5" style="width:100%" value="'+(q.q5||'')+'"></p></div><button class="pri" data-a="submitq">Submit</button>'},
+debrief:function(){return '<h1>Thank you</h1><div class="card"><p>Some of the AI-created views in this task contained deliberate errors, which we added to study how people check AI output. The errors were: '+VIEWS.filter(function(v){return v.err}).map(function(v){return v.name}).join(' and ')+'.</p><p>There is nothing you did wrong. Your answers help us design better review tools.</p></div><div class="card"><p class="mut">The session is finished. Please let the researcher know.</p><label class="mut">Researcher code<br><input id="code" type="password"></label> <button data-a="unlock">Open researcher view</button><div id="msg" class="err"></div></div>'},
+results:function(){var m=metrics();return '<h1>Researcher results</h1><div class="card"><div class="wrap"><table>'+m.rows.map(function(r){return '<tr><th>'+r[0]+'</th><td>'+r[1]+'</td></tr>'}).join('')+'</table></div></div><div class="row"><button data-a="copyp">Copy participant table ('+savedN()+' saved)</button><button data-a="copyv">Copy view table</button><button data-a="copylog">Copy this session log (JSON)</button><button data-a="clear">'+(S.clr?'Confirm: clear saved':'Clear saved sessions')+'</button><button data-a="restart">New session</button></div><div id="msg" class="mut"></div><pre>'+JSON.stringify(S.log,null,1).replace(/</g,'&lt;')+'</pre>'}
+};
+function metrics(){var errs=VIEWS.filter(function(v){return v.err}),caught=0,missed=[],fr=0,unn=0,conf=[];
+ errs.forEach(function(v){var s=S.views[v.id];if(s.status==='rejected'||s.replaced)caught++;else{missed.push(v.name);if(s.conf)conf.push(s.conf)}});
+ VIEWS.forEach(function(v){var s=S.views[v.id];if(!v.err&&v.src==='ai'&&s.status==='rejected')fr++;if(!v.err&&s.replaced)unn++});
+ var trueAI=VIEWS.filter(function(v){return v.src==='ai'}).map(function(v){return v.id}),ans=S.q?S.q.ai:[],ok=0;VIEWS.forEach(function(v){if((trueAI.indexOf(v.id)>-1)===(ans.indexOf(v.id)>-1))ok++});
+ var avg=conf.length?(conf.reduce(function(a,b){return a+b},0)/conf.length).toFixed(1):'n/a';
+ var rows=[['Participant',S.pid||'(none)'],['Condition',S.cond],['Planted errors caught',caught+' / '+errs.length],['Errors still in shots',missed.join(', ')||'none'],['Correct AI views rejected',fr],['Correct views replaced unnecessarily',unn],['Source identification accuracy',S.q?ok+' / '+VIEWS.length:'n/a'],['Mean confidence on missed errors',avg],['Total compare time (s)',Math.round(S.cmpMs/1000)],['Review time (s)',Math.round(S.revMs/1000)],['Q2 understood impact',S.q?S.q.q2:'n/a'],['Q3 confidence in kept views',S.q?S.q.q3:'n/a'],['Q4 effort',S.q?S.q.q4:'n/a'],['Events logged',S.log.length]];
+ return {rows:rows,p:[S.pid,S.cond,caught,errs.length,fr,unn,S.q?ok:'',VIEWS.length,avg,Math.round(S.cmpMs/1000),Math.round(S.revMs/1000),S.q?S.q.q2:'',S.q?S.q.q3:'',S.q?S.q.q4:'',S.q?S.q.q5:'',VIEWS.map(function(v){return v.id}).join('>')],csv:[S.pid,S.cond,caught,fr,unn,S.q?ok:'',avg,Math.round(S.cmpMs/1000),Math.round(S.revMs/1000),S.q?S.q.q2:'',S.q?S.q.q3:'',S.q?S.q.q4:''].join(',')}}
+function render(){if(S.step==='results'&&!S.auth)S.step='debrief';var bar=(S.step==='setup'||S.step==='results')?'':'<div class="bar">'+STEPS.filter(function(s){return s!=='setup'&&s!=='results'}).map(function(s){return '<span class="pill'+(s===S.step?' on':'')+'">'+LABELS[s]+'</span>'}).join('')+'</div>';document.getElementById('app').innerHTML=bar+P[S.step]()}
+function goto(to){if(S.step==='review'&&S.tRev){S.revMs+=Date.now()-S.tRev;S.tRev=0}if(S.cmp)closeCmp();S.step=to;if(to==='review')S.tRev=Date.now();S.toast='';log('page',{page:to})}
+function closeCmp(){var d=Date.now()-S.cmpStart;S.cmpMs+=d;if(S.views[S.cmp])S.views[S.cmp].cmpMs+=d;log('compare_close',{view:S.cmp});S.cmp=null}
+var PH=['pid','condition','errors_caught','errors_total','false_rejections','unneeded_replacements','source_id_correct','source_id_total','mean_conf_missed','compare_s','review_s','q2_understood','q3_confident','q4_effort','q5_notes','view_order'];
+var VH=['pid','condition','position','view_id','view_name','source_original','planted_error','final_status','replaced','confidence','compare_opens','compare_s'];
+function cell(x){return String(x==null?'':x).replace(/[\t\r\n]+/g,' ')}
+function tsv(h,rows){return [h].concat(rows).map(function(r){return r.map(cell).join('\t')}).join('\n')}
+function vRows(){return VIEWS.map(function(v,i){var s=S.views[v.id];return [S.pid,S.cond,i+1,v.id,v.name,v.src,v.err?1:0,s.status,s.replaced?1:0,s.conf||'',s.cmpN,Math.round(s.cmpMs/1000)]})}
+function saved(){try{return JSON.parse(localStorage.getItem('sessions')||'[]')}catch(x){return []}}
+function savedN(){return saved().length}
+function saveSession(){try{var a=saved();a.push({p:metrics().p,v:vRows(),log:S.log});localStorage.setItem('sessions',JSON.stringify(a))}catch(x){}}
+function allP(){var a=saved();return a.length?a.map(function(x){return x.p}):[metrics().p]}
+function allV(){var a=saved(),o=[];if(!a.length)return vRows();a.forEach(function(x){o=o.concat(x.v)});return o}
+function copy(t){var m=document.getElementById('msg');try{navigator.clipboard.writeText(t).then(function(){m.textContent='Copied.'},function(){m.textContent='Copy failed. Select the text manually.'})}catch(x){m.textContent='Copy failed. Select the text manually.'}}
+document.addEventListener('input',function(e){var t=e.target,d=t.dataset||{};if(t.id==='pid')S.pid=t.value;else if(d.f==='product')CFG.product=t.value;else if(d.f==='sheet')CFG.sheet=t.value;else if(d.f==='name')CFG.views[+d.i].name=t.value;else if(d.f==='shotn')CFG.shots[+d.i].n=t.value});
+document.addEventListener('change',function(e){var t=e.target,d=t.dataset||{};
+ if(d.a==='conf'){S.views[d.id].conf=+t.value;log('confidence',{view:d.id,value:+t.value})}
+ else if(t.id==='cond')S.condSel=t.value;
+ else if(d.a==='custom'){CFG.custom=t.checked;render()}
+ else if(d.f==='src'){CFG.views[+d.i].src=t.value;render()}
+ else if(d.f==='err'){CFG.views[+d.i].err=t.checked;render()}
+ else if(d.f==='shotv')CFG.shots[+d.i].vi=+t.value;
+ else if(d.f==='img'||d.f==='fix'){var f=t.files&&t.files[0];if(!f)return;var r=new FileReader();r.onload=function(){CFG.views[+d.i][d.f]=r.result;render()};r.readAsDataURL(f)}});
+document.addEventListener('click',function(e){var b=e.target.closest('button');if(!b)return;var a=b.dataset.a,id=b.dataset.id,s=id&&S.views[id];
+ if(a==='consent'){if(!document.getElementById('cons').checked){document.getElementById('msg').textContent='Please tick the box to continue.';return}S.consent=true;S.step='tutorial'}
+ else if(a==='start'){if(!applyCfg())return;S.pid=document.getElementById('pid').value.trim();var c=document.getElementById('cond').value;S.cond=c==='random'?(Math.random()<.5?'baseline':'labeled'):c==='alt'?nextAlt():c;S.t0=Date.now();S.log=[];S.cmpMs=0;S.revMs=0;S.q=null;S.auth=false;VIEWS=shuf(VIEWS);init();S.step='consent';log('start',{order:VIEWS.map(function(v){return v.id})})}
+ else if(a==='go')goto(b.dataset.to)
+ else if(a==='cmp'){if(S.cmp)closeCmp();S.cmp=id;S.views[id].cmpN++;S.cmpStart=Date.now();log('compare_open',{view:id})}
+ else if(a==='closecmp')closeCmp()
+ else if(a==='approve'){s.status='approved';S.toast='';log('approve',{view:id,source:s.src,viewed:S.cmp===id})}
+ else if(a==='reject'){s.status='rejected';S.toast=(S.cond==='labeled'&&impact(id))?'Rejected. This affects '+impact(id)+'.':'';log('reject',{view:id,source:s.src})}
+ else if(a==='replace'){s.spec=vget(id).truth;s.src='user';s.status='approved';s.replaced=true;S.toast=impact(id)?'Replaced. '+impact(id)+' will use your edited view.':'';log('replace',{view:id})}
+ else if(a==='toggle'){s.status=s.status==='approved'?'rejected':'approved';log('toggle',{view:id,status:s.status})}
+ else if(a==='submitq'){var ai=VIEWS.filter(function(v){return document.getElementById('qa_'+v.id).checked}).map(function(v){return v.id});S.q={ai:ai,q2:document.getElementById('q2').value,q3:document.getElementById('q3').value,q4:document.getElementById('q4').value,q5:document.getElementById('q5').value};log('questionnaire',S.q);goto('debrief');saveSession()}
+ else if(a==='copylog'){copy(JSON.stringify(S.log));return}
+ else if(a==='copyp'){copy(tsv(PH,allP()));return}
+ else if(a==='copyv'){copy(tsv(VH,allV()));return}
+ else if(a==='clear'){if(S.clr){try{localStorage.removeItem('sessions')}catch(x){}S.clr=false}else{S.clr=true}}
+ else if(a==='addview'){CFG.views.push({name:'View '+(CFG.views.length+1),src:'ai',err:false,img:'',fix:''})}
+ else if(a==='rmview'){var ri=+b.dataset.i;CFG.views.splice(ri,1);CFG.shots.forEach(function(sh){if(sh.vi===ri)sh.vi=0;else if(sh.vi>ri)sh.vi--})}
+ else if(a==='unlock'){var cd=document.getElementById('code');if(!cd||cd.value!==CODE){var mm=document.getElementById('msg');if(mm)mm.textContent='Wrong code.';return}S.auth=true;S.step=S.step==='debrief'?'results':'setup'}
+ else if(a==='restart'){S.step='setup'}
+ render()});
+render();
+</script>
+</body>
+</html>
