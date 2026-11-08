@@ -1,18 +1,24 @@
 // Backend for the Make page in ../index.html.
 // Serves the prototype and answers POST /api/generate with a new camera view of the product.
 //
-// Providers (picked automatically, or set PROVIDER=fal|hf in server/.env):
+// Providers (picked automatically, or set PROVIDER=local|fal|hf in server/.env):
+//   local - free, runs on this computer: a quantized copy of the same model in ComfyUI (see setup-local.sh).
+//           The server starts ComfyUI itself. Slower (minutes per view) and a little lower quality than fal.
 //   fal - fal.ai "qwen-image-edit-2511-multiple-angles" (paid, best quality, exact degree inputs). Needs FAL_KEY.
 //   hf  - public Hugging Face Space running the same 2511 model + angles LoRA on free ZeroGPU. Needs HF_TOKEN:
 //         anonymous quota is below the 60 s each call reserves, so it always fails without a token.
 //   none of the keys set -> the page keeps its built-in mock generator.
 //
-// index.html is never modified on disk: when a provider is configured, its `var BACKEND='';` hook is set to '/api'
-// in the copy this server sends.
+// The page gets a small "AI generator" panel (setup-panel.js, added to the served copy) to install the local
+// generator with one click, or switch to cloud with a fal.ai key. Choices are saved in server/.env.
+// index.html is never modified on disk: the served copy gets the panel script, and its `var BACKEND='';` hook is
+// pointed at '/api' whenever the selected generator is ready.
 
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
+import os from 'node:os';
+import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { Client } from '@gradio/client';
 
@@ -21,11 +27,61 @@ const ROOT = path.resolve(HERE, '..');
 loadEnv(path.join(HERE, '.env'));
 
 const PORT = +(process.env.PORT || 8787);
-const FAL_KEY = process.env.FAL_KEY || '';
-const HF_TOKEN = process.env.HF_TOKEN || '';
+const ENV_FILE = path.join(HERE, '.env');
+const env = k => process.env[k] || '';
 const HF_SPACE = process.env.HF_SPACE || 'multimodalart/qwen-image-multiple-angles-3d-camera';
 const FAL_MODEL = process.env.FAL_MODEL || 'fal-ai/qwen-image-edit-2511-multiple-angles';
-const PROVIDER = (process.env.PROVIDER || (FAL_KEY ? 'fal' : HF_TOKEN ? 'hf' : 'mock')).toLowerCase();
+const COMFY_URL = (process.env.COMFY_URL || 'http://127.0.0.1:8188').replace(/\/$/, '');
+const COMFY_DIR = (process.env.COMFY_DIR || '~/ComfyUI').replace(/^~/, os.homedir());
+const MODELS = path.join(COMFY_DIR, 'models');
+
+// What setup-local.sh downloads, sized to this machine's memory (GB from the Hugging Face listings).
+const RAM_GB = os.totalmem() / 2 ** 30;
+const TIER = RAM_GB >= 40 ? { q: 'Q8_0', cq: 'Q8_0', unet: 22.35, clip: 8.10, mp: 1.0 }
+  : RAM_GB >= 24 ? { q: 'Q5_K_M', cq: 'Q6_K', unet: 15.40, clip: 6.25, mp: 0.8 }
+  : { q: 'Q3_K_M', cq: 'Q4_K_M', unet: 9.92, clip: 4.68, mp: 0.6 };
+const PLAN = {
+  unet: process.env.LOCAL_UNET || `qwen-image-edit-2511-${TIER.q}.gguf`,
+  clip: process.env.LOCAL_CLIP || `Qwen2.5-VL-7B-Instruct-${TIER.cq}.gguf`,
+};
+PLAN.files = [ // [folder, file, GB]
+  ['vae', 'qwen_image_vae.safetensors', 0.25],
+  ['loras', 'qwen-image-edit-2511-multiple-angles-lora.safetensors', 0.30],
+  ['loras', 'Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors', 0.85],
+  ['text_encoders', 'mmproj-BF16.gguf', 1.35],
+  ['text_encoders', PLAN.clip, TIER.clip],
+  ['unet', PLAN.unet, TIER.unet],
+];
+PLAN.gb = PLAN.files.reduce((a, f) => a + f[2], 0);
+
+// Local model files actually used: the largest quantization installed (or the plan, before install).
+const largest = (dir, re) => { try { return fs.readdirSync(dir).filter(f => re.test(f)).map(f => [f, fs.statSync(path.join(dir, f)).size]).sort((a, b) => b[1] - a[1])[0]?.[0]; } catch { return undefined; } };
+const LOCAL = {
+  get unet() { return process.env.LOCAL_UNET || largest(path.join(MODELS, 'unet'), /^qwen-image-edit-2511-.*\.gguf$/i) || PLAN.unet; },
+  get clip() { return process.env.LOCAL_CLIP || largest(path.join(MODELS, 'text_encoders'), /^Qwen2\.5-VL-7B-Instruct-(?!.*mmproj).*\.gguf$/i) || PLAN.clip; },
+  vae: 'qwen_image_vae.safetensors',
+  lightning: 'Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors',
+  angles: 'qwen-image-edit-2511-multiple-angles-lora.safetensors',
+  // Output size in megapixels: 1.0 is ~1024x1024. Smaller machines default lower to stay fast and in memory.
+  megapixels: +(process.env.LOCAL_MEGAPIXELS || TIER.mp),
+};
+const localInstalled = () => fs.existsSync(path.join(COMFY_DIR, '.venv', 'bin', 'python'))
+  && fs.existsSync(path.join(MODELS, 'unet', LOCAL.unet)) && fs.existsSync(path.join(MODELS, 'text_encoders', LOCAL.clip))
+  && PLAN.files.slice(0, 4).every(([d, f]) => fs.existsSync(path.join(MODELS, d, f)));
+
+// Selected generator: PROVIDER in .env (set by the panel), else the best one available.
+const provider = () => (env('PROVIDER') || (env('FAL_KEY') ? 'fal' : localInstalled() ? 'local' : env('HF_TOKEN') ? 'hf' : 'mock')).toLowerCase();
+const usable = (p = provider()) => (p === 'fal' && !!env('FAL_KEY')) || (p === 'hf' && !!env('HF_TOKEN')) || (p === 'local' && localInstalled());
+
+function saveEnv(updates) { // update KEY=value lines in server/.env (git-ignored); '' removes a key
+  let lines = fs.existsSync(ENV_FILE) ? fs.readFileSync(ENV_FILE, 'utf8').split(/\r?\n/) : [];
+  for (const [k, v] of Object.entries(updates)) {
+    lines = lines.filter(l => !new RegExp(`^\\s*${k}\\s*=`).test(l));
+    if (v) lines.push(`${k}=${v}`);
+    if (v) process.env[k] = v; else delete process.env[k];
+  }
+  fs.writeFileSync(ENV_FILE, lines.filter((l, i, a) => l.trim() || i < a.length - 1).join('\n').trim() + '\n', { mode: 0o600 });
+}
 
 function loadEnv(file) {
   if (!fs.existsSync(file)) return;
@@ -74,7 +130,7 @@ async function viaFal(p, ref, rel) {
   };
   const r = await fetch(`https://fal.run/${FAL_MODEL}`, {
     method: 'POST',
-    headers: { Authorization: `Key ${FAL_KEY}`, 'Content-Type': 'application/json' },
+    headers: { Authorization: `Key ${env('FAL_KEY')}`, 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
   const j = await r.json().catch(() => ({}));
@@ -84,7 +140,7 @@ async function viaFal(p, ref, rel) {
 
 let hfClient = null;
 async function hf() {
-  if (!hfClient) hfClient = await Client.connect(HF_SPACE, HF_TOKEN ? { hf_token: HF_TOKEN } : {});
+  if (!hfClient) hfClient = await Client.connect(HF_SPACE, env('HF_TOKEN') ? { hf_token: env('HF_TOKEN') } : {});
   return hfClient;
 }
 
@@ -106,13 +162,93 @@ async function viaHf(p, ref, rel) {
   return { url: res.data[0].url, seed: res.data[1], prompt: res.data[2] };
 }
 
+// The angles LoRA understands 8 azimuths, 4 elevations and 3 distances; snap to the nearest.
+const AZ_WORDS = ['front view', 'front-right quarter view', 'right side view', 'back-right quarter view', 'back view', 'back-left quarter view', 'left side view', 'front-left quarter view'];
+function lockedPrompt(rel, p) {
+  const az = AZ_WORDS[Math.round(((rel % 360) + 360) % 360 / 45) % 8];
+  const el = p.elevation < -15 ? 'low-angle shot' : p.elevation < 15 ? 'eye-level shot' : p.elevation < 45 ? 'elevated shot' : 'high-angle shot';
+  const d = p.distance < 30 ? 'close-up' : p.distance < 70 ? 'medium shot' : 'wide shot';
+  return `<sks> ${az} ${el} ${d}`;
+}
+
+let comfyProc = null, comfyStarting = null;
+async function comfyUp() {
+  try { return (await fetch(`${COMFY_URL}/system_stats`)).ok; } catch { return false; }
+}
+async function ensureComfy() {
+  if (await comfyUp()) return;
+  if (!comfyStarting) comfyStarting = (async () => {
+    const py = path.join(COMFY_DIR, '.venv', 'bin', 'python');
+    if (!fs.existsSync(py)) throw new Error('The free AI generator is not set up yet: use "Set up free AI generator" at the top of the page');
+    const port = new URL(COMFY_URL).port || '8188';
+    const log = fs.openSync(path.join(os.tmpdir(), 'view-review-comfyui.log'), 'a');
+    console.log(`[local] starting ComfyUI on port ${port} (log: ${path.join(os.tmpdir(), 'view-review-comfyui.log')})`);
+    // Under 24 GB the model and text encoder don't fit together: free each one after use instead of swapping.
+    const args = ['main.py', '--listen', '127.0.0.1', '--port', port, '--disable-auto-launch', ...(RAM_GB < 24 ? ['--disable-smart-memory'] : [])];
+    comfyProc = spawn(py, args, { cwd: COMFY_DIR, stdio: ['ignore', log, log] });
+    comfyProc.on('exit', c => { console.log(`[local] ComfyUI exited (${c})`); comfyProc = null; });
+    for (let i = 0; i < 180; i++) { if (await comfyUp()) return; await new Promise(r => setTimeout(r, 1000)); }
+    throw new Error('ComfyUI did not start within 3 minutes');
+  })().finally(() => { comfyStarting = null; });
+  return comfyStarting;
+}
+for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(sig, () => { comfyProc?.kill(); installer?.kill(); process.exit(0); });
+
+function comfyWorkflow(imageName, prompt, seed) {
+  // Same graph as fal's published comfyui-workflow-multiple-angles.json, with GGUF loaders for a 16 GB Mac.
+  return {
+    unet: { class_type: 'UnetLoaderGGUF', inputs: { unet_name: LOCAL.unet } },
+    angles: { class_type: 'LoraLoaderModelOnly', inputs: { model: ['unet', 0], lora_name: LOCAL.angles, strength_model: 0.9 } },
+    lightning: { class_type: 'LoraLoaderModelOnly', inputs: { model: ['angles', 0], lora_name: LOCAL.lightning, strength_model: 1 } },
+    shift: { class_type: 'ModelSamplingAuraFlow', inputs: { model: ['lightning', 0], shift: 3.1 } },
+    cfgnorm: { class_type: 'CFGNorm', inputs: { model: ['shift', 0], strength: 1 } },
+    clip: { class_type: 'CLIPLoaderGGUF', inputs: { clip_name: LOCAL.clip, type: 'qwen_image' } },
+    vae: { class_type: 'VAELoader', inputs: { vae_name: LOCAL.vae } },
+    load: { class_type: 'LoadImage', inputs: { image: imageName } },
+    scale: { class_type: 'ImageScaleToTotalPixels', inputs: { image: ['load', 0], upscale_method: 'lanczos', megapixels: LOCAL.megapixels, resolution_steps: 16 } },
+    pos: { class_type: 'TextEncodeQwenImageEditPlus', inputs: { clip: ['clip', 0], vae: ['vae', 0], image1: ['scale', 0], prompt } },
+    neg: { class_type: 'TextEncodeQwenImageEditPlus', inputs: { clip: ['clip', 0], vae: ['vae', 0], image1: ['scale', 0], prompt: '' } },
+    posref: { class_type: 'FluxKontextMultiReferenceLatentMethod', inputs: { conditioning: ['pos', 0], reference_latents_method: 'index_timestep_zero' } },
+    negref: { class_type: 'FluxKontextMultiReferenceLatentMethod', inputs: { conditioning: ['neg', 0], reference_latents_method: 'index_timestep_zero' } },
+    latent: { class_type: 'VAEEncode', inputs: { pixels: ['scale', 0], vae: ['vae', 0] } },
+    sample: { class_type: 'KSampler', inputs: { model: ['cfgnorm', 0], positive: ['posref', 0], negative: ['negref', 0], latent_image: ['latent', 0], seed, steps: 4, cfg: 1, sampler_name: 'euler', scheduler: 'simple', denoise: 1 } },
+    decode: { class_type: 'VAEDecode', inputs: { samples: ['sample', 0], vae: ['vae', 0] } },
+    save: { class_type: 'SaveImage', inputs: { images: ['decode', 0], filename_prefix: 'view-review/angle' } },
+  };
+}
+
+async function viaLocal(p, ref, rel) {
+  await ensureComfy();
+  const form = new FormData();
+  const blob = dataUrlToBlob(ref.image);
+  form.append('image', blob, `ref-${Date.now()}.${(blob.type.split('/')[1] || 'png').replace('jpeg', 'jpg')}`);
+  form.append('overwrite', 'true');
+  const up = await (await fetch(`${COMFY_URL}/upload/image`, { method: 'POST', body: form })).json();
+  const prompt = lockedPrompt(rel, p), seed = Math.floor(Math.random() * 2 ** 31);
+  const q = await fetch(`${COMFY_URL}/prompt`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ prompt: comfyWorkflow(up.name, prompt, seed) }) });
+  const qj = await q.json();
+  if (!q.ok || !qj.prompt_id) throw new Error(`ComfyUI rejected the workflow: ${JSON.stringify(qj.node_errors || qj.error || qj).slice(0, 500)}`);
+  for (let i = 0; i < 1200; i++) { // up to 20 minutes
+    await new Promise(r => setTimeout(r, 1000));
+    const h = (await (await fetch(`${COMFY_URL}/history/${qj.prompt_id}`)).json())[qj.prompt_id];
+    if (!h) continue;
+    if (h.status?.status_str === 'error') {
+      const m = (h.status.messages || []).find(x => x[0] === 'execution_error');
+      throw new Error(`ComfyUI error: ${m ? m[1].exception_message : 'unknown'}`);
+    }
+    const img = h.outputs?.save?.images?.[0];
+    if (img) return { url: `${COMFY_URL}/view?${new URLSearchParams({ filename: img.filename, subfolder: img.subfolder, type: img.type })}`, prompt, seed };
+  }
+  throw new Error('Local generation timed out after 20 minutes');
+}
+
 /* ---------- helpers ---------- */
 function dataUrlToBlob(d) {
   const m = /^data:([^;]+);base64,(.*)$/s.exec(d || '');
   if (!m) throw new Error('Reference image must be a base64 data URL');
   return new Blob([Buffer.from(m[2], 'base64')], { type: m[1] });
 }
-const authHeaders = url => (HF_TOKEN && /hf\.space|huggingface\.co/.test(url) ? { headers: { Authorization: `Bearer ${HF_TOKEN}` } } : {});
+const authHeaders = url => (env('HF_TOKEN') && /hf\.space|huggingface\.co/.test(url) ? { headers: { Authorization: `Bearer ${env('HF_TOKEN')}` } } : {});
 async function urlToDataUrl(url) {
   const r = await fetch(url, authHeaders(url));
   if (!r.ok) throw new Error(`Could not download result (${r.status})`);
@@ -134,11 +270,87 @@ async function generate(p) {
   const q = { azimuth: az, elevation: +p.elevation || 0, distance: +(p.distance ?? 50), roll: +p.roll || 0, lens_mm: +p.lens_mm || 50 };
   const { ref, rel } = pickReference(p.images, az);
   const t0 = Date.now();
-  if (PROVIDER !== 'fal' && PROVIDER !== 'hf') throw new Error('No generator configured: add FAL_KEY or HF_TOKEN to server/.env');
-  const r = PROVIDER === 'fal' ? await viaFal(q, ref, rel) : await viaHf(q, ref, rel);
+  const P = provider(), run = { fal: viaFal, hf: viaHf, local: viaLocal }[P];
+  if (!run || !usable(P)) throw new Error('No AI generator is ready: set one up in the panel at the top of the page');
+  let r;
+  try { r = await run(q, ref, rel); lastError = ''; lastSecs = Math.round((Date.now() - t0) / 1000); } catch (e) { lastError = friendly(e.message); throw e; }
   const image = await urlToDataUrl(r.url);
-  console.log(`[generate] ${PROVIDER} az=${az} el=${q.elevation} from ${ref.side} (turn ${Math.round(rel)}) in ${((Date.now() - t0) / 1000).toFixed(1)}s :: ${r.prompt || ''}`);
-  return { image, provider: PROVIDER, reference: ref.side, relative_turn: Math.round(rel), prompt: r.prompt, seed: r.seed };
+  console.log(`[generate] ${P} az=${az} el=${q.elevation} from ${ref.side} (turn ${Math.round(rel)}) in ${((Date.now() - t0) / 1000).toFixed(1)}s :: ${r.prompt || ''}`);
+  return { image, provider: P, reference: ref.side, relative_turn: Math.round(rel), prompt: r.prompt, seed: r.seed };
+}
+
+/* ---------- one-click local setup ---------- */
+let installer = null, lastError = '', lastSecs = 0;
+const SETUP = { state: 'idle', phase: '', log: [], error: '' }; // idle | installing | failed
+function friendly(m = '') {
+  if (/TOP_UP|locked/i.test(m)) return 'Your fal.ai account needs credit. Add some at fal.ai/dashboard/billing, then try again.';
+  if (/fal\.ai 401|fal\.ai 403/i.test(m)) return 'fal.ai did not accept the API key. Check it and save it again.';
+  return m.replace(/^Generation failed: /, '').slice(0, 300);
+}
+function bytesOnDisk() { // finished model files + partial downloads (.incomplete) of this plan
+  let n = 0;
+  for (const [d, f] of PLAN.files) { try { n += fs.lstatSync(path.join(MODELS, d, f)).size; } catch {} }
+  const walk = dir => { try { for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+    const p = path.join(dir, e.name);
+    if (e.isDirectory()) walk(p); else if (e.name.endsWith('.incomplete')) n += fs.statSync(p).size;
+  } } catch {} };
+  for (const d of ['vae', 'loras', 'text_encoders', 'unet']) walk(path.join(MODELS, d, '.cache'));
+  return n;
+}
+function startInstall() {
+  if (installer) return;
+  const rt = path.join(ROOT, '.runtime');
+  const PATH = [path.join(rt, 'bin'), path.join(rt, 'node', 'bin'), path.join(os.homedir(), '.local', 'bin'), '/opt/homebrew/bin', '/usr/local/bin', process.env.PATH].join(':');
+  Object.assign(SETUP, { state: 'installing', phase: 'engine', log: [], error: '' });
+  console.log(`[setup] installing local generator (${PLAN.unet}, ${PLAN.clip}, ~${PLAN.gb.toFixed(0)} GB) into ${COMFY_DIR}`);
+  installer = spawn('bash', [path.join(HERE, 'setup-local.sh')], { env: { ...process.env, PATH, COMFY_DIR, LOCAL_UNET: PLAN.unet, LOCAL_CLIP: PLAN.clip } });
+  const onData = buf => { for (const line of buf.toString().split(/[\r\n]+/)) {
+    const l = line.trim(); if (!l) continue;
+    const m = /^STEP: (\w+)/.exec(l); if (m) SETUP.phase = m[1]; else SETUP.log = [...SETUP.log, l].slice(-8);
+  } };
+  installer.stdout.on('data', onData); installer.stderr.on('data', onData);
+  installer.on('exit', code => {
+    installer = null;
+    if (code === 0 && localInstalled()) {
+      SETUP.state = 'idle'; console.log('[setup] done');
+      if (!env('PROVIDER') || env('PROVIDER') === 'local') { saveEnv({ PROVIDER: 'local' }); ensureComfy().catch(e => { lastError = e.message; }); }
+    } else {
+      Object.assign(SETUP, { state: 'failed', error: SETUP.log.slice(-3).join(' · ') || `Setup stopped (code ${code})` });
+      console.error('[setup] failed:', SETUP.error);
+    }
+  });
+}
+async function status() {
+  const P = provider(), up = await comfyUp();
+  const engine = up ? 'ready' : comfyStarting ? 'starting' : 'stopped';
+  const key = env('FAL_KEY');
+  return {
+    mode: P === 'fal' ? 'cloud' : P === 'local' ? 'local' : P, usable: usable(P), lastError, lastSecs,
+    local: { installed: localInstalled(), engine, ram: Math.round(RAM_GB), model: LOCAL.unet, gb: +PLAN.gb.toFixed(1),
+      setup: { ...SETUP, doneGb: SETUP.state === 'installing' ? +(bytesOnDisk() / 1e9).toFixed(1) : 0 } },
+    cloud: { keySet: !!key, keyHint: key ? `…${key.slice(-4)}` : '' },
+  };
+}
+async function setupApi(req, res, url) {
+  const send = (o, code = 200) => { res.writeHead(code, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(o)); };
+  if (req.method === 'GET' && url.pathname === '/api/setup/status') return send(await status());
+  // State-changing calls: same-origin only (custom header forces a CORS preflight that this server never allows).
+  if (req.method !== 'POST' || req.headers['x-view-review'] !== '1') return send({ error: 'forbidden' }, 403);
+  const body = JSON.parse((await readBody(req, 1e5)) || '{}');
+  if (url.pathname === '/api/setup/install') { startInstall(); return send(await status()); }
+  if (url.pathname === '/api/setup/mode') {
+    const p = body.mode === 'cloud' ? 'fal' : 'local';
+    saveEnv({ PROVIDER: p }); lastError = '';
+    if (p === 'local' && localInstalled()) ensureComfy().catch(e => { lastError = e.message; });
+    return send(await status());
+  }
+  if (url.pathname === '/api/setup/cloud-key') {
+    const k = String(body.key || '').trim();
+    if (k && !/^[\w:.-]{16,200}$/.test(k)) return send({ error: 'That does not look like a fal.ai API key.' }, 400);
+    saveEnv({ FAL_KEY: k, PROVIDER: k ? 'fal' : (localInstalled() ? 'local' : '') }); lastError = '';
+    return send(await status());
+  }
+  return send({ error: 'not found' }, 404);
 }
 
 /* ---------- http ---------- */
@@ -149,7 +361,12 @@ const server = http.createServer(async (req, res) => {
   try {
     if (url.pathname === '/api/health') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify({ ok: true, provider: PROVIDER, model: PROVIDER === 'fal' ? FAL_MODEL : PROVIDER === 'hf' ? HF_SPACE : 'built-in mock (page)' }));
+      return res.end(JSON.stringify({ ok: true, provider: provider(), ready: usable(), model: { fal: FAL_MODEL, hf: HF_SPACE, local: `ComfyUI ${LOCAL.unet}` }[provider()] || 'built-in mock (page)' }));
+    }
+    if (url.pathname.startsWith('/api/setup/')) return await setupApi(req, res, url);
+    if (url.pathname === '/__panel/setup-panel.js') {
+      res.writeHead(200, { 'Content-Type': 'text/javascript', 'Cache-Control': 'no-store' });
+      return res.end(fs.readFileSync(path.join(HERE, 'setup-panel.js')));
     }
     if (url.pathname === '/api/generate' && req.method === 'POST') {
       const out = await generate(JSON.parse(await readBody(req)));
@@ -164,7 +381,11 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(404); return res.end('Not found');
     }
     let data = fs.readFileSync(file);
-    if (file === path.join(ROOT, 'index.html') && PROVIDER !== 'mock') data = Buffer.from(data.toString('utf8').replace("var BACKEND='';", "var BACKEND='/api';"));
+    if (file === path.join(ROOT, 'index.html')) {
+      let html = data.toString('utf8');
+      if (usable()) html = html.replace("var BACKEND='';", "var BACKEND='/api';");
+      data = Buffer.from(html.replace('</body>', '<script src="/__panel/setup-panel.js"></script>\n</body>'));
+    }
     res.writeHead(200, { 'Content-Type': TYPES[path.extname(file).toLowerCase()] || 'application/octet-stream', 'Cache-Control': 'no-store' });
     res.end(data);
   } catch (e) {
@@ -175,7 +396,10 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-server.listen(PORT, () => {
+// Localhost only: the setup endpoints install software and store an API key.
+server.listen(PORT, '127.0.0.1', () => {
+  const P = provider();
   console.log(`View Review prototype: http://localhost:${PORT}/`);
-  console.log(`Generator: ${PROVIDER === 'fal' ? `fal.ai (${FAL_MODEL})` : PROVIDER === 'hf' ? `Hugging Face Space ${HF_SPACE}` : 'none - the page uses its mock. Add FAL_KEY (or HF_TOKEN) to server/.env and restart.'}`);
+  console.log(`Generator: ${{ fal: `fal.ai (${FAL_MODEL})`, hf: `Hugging Face Space ${HF_SPACE}`, local: `local ComfyUI (${LOCAL.unet}, ${LOCAL.megapixels} MP)` }[P] || 'none yet'}${usable(P) ? '' : ' - not ready; use the panel at the top of the page'}`);
+  if (P === 'local' && usable(P)) ensureComfy().then(() => console.log('[local] ComfyUI ready'), e => console.error('[local]', e.message));
 });
