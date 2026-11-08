@@ -22,8 +22,9 @@ It takes one product photo and a camera position (azimuth, elevation, distance) 
 1. Double-click **`Start.command`** in the repo folder. The first time, it fetches Node.js and uv into
    `.runtime/` (no admin rights needed), then opens http://localhost:8787/. Keep its window open; close it to stop.
 2. In the **AI generator** panel at the top of the page, pick one:
-   - **Local (free):** click **Set up free AI generator**. It installs ComfyUI into `~/ComfyUI` and downloads
-     the model, sized to the Mac's memory (table below), with a progress bar. When it finishes, Make uses it.
+   - **Local (free):** choose a model size (the one that fits the Mac's memory is pre-selected) and click
+     **Download … and set up**. It installs ComfyUI into `~/ComfyUI` and downloads the model with a progress bar.
+     When it finishes, Make uses it. **Change model** downloads another size or switches between downloaded ones.
    - **Cloud (fal.ai):** paste a fal.ai API key (needs credit on the fal.ai account) and click **Save and use cloud**.
    Switch between them any time with the Local / Cloud buttons. Choices and the key are saved in
    `server/.env`, which is git-ignored and stays on that Mac.
@@ -35,15 +36,17 @@ works from a terminal: `npm --prefix server ci && npm --prefix server start`.
 
 With `PROVIDER=local` the server starts ComfyUI by itself (log in `$TMPDIR/view-review-comfyui.log`) and
 runs the same graph as fal's published `comfyui-workflow-multiple-angles.json` with GGUF (quantized) weights.
-The download is sized to the machine's memory, and the server uses the largest model installed:
+Model sizes offered in the panel (download includes ~1 GB for ComfyUI and Python the first time):
 
-| Memory | Model / text encoder | Download | Output size |
+| Size | Model / text encoder | Download | Recommended for |
 | --- | --- | --- | --- |
-| 40 GB+ (e.g. M4 Pro 48 GB) | Q8_0 / Q8_0, near full quality | ~33 GB | 1.0 MP (~1024 px) |
-| 24–39 GB | Q5_K_M / Q6_K | ~25 GB | 0.8 MP |
-| under 24 GB (e.g. M5 16 GB) | Q3_K_M / Q4_K_M | ~17 GB | 0.6 MP |
+| Best quality | Q8_0 / Q8_0, near full quality | ~34 GB | 40 GB+ memory (e.g. M4 Pro 48 GB) |
+| Balanced | Q5_K_M / Q6_K | ~25 GB | 24–39 GB |
+| Small | Q3_K_M / Q4_K_M | ~18 GB | under 24 GB (e.g. M5 16 GB) |
 
-Override with `LOCAL_UNET`, `LOCAL_CLIP` or `LOCAL_MEGAPIXELS` in `server/.env`. `bash server/setup-local.sh`
+The choice is saved as `LOCAL_MODEL` (best / balanced / small) in `server/.env`. Output size follows memory:
+1.0 MP (~1024 px) at 40 GB+, 0.8 MP at 24 GB+, else 0.6 MP. Override with `LOCAL_UNET`, `LOCAL_CLIP` or
+`LOCAL_MEGAPIXELS`. `bash server/setup-local.sh`
 runs the same install from a terminal.
 
 ## How the UI controls are mapped

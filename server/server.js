@@ -35,39 +35,43 @@ const COMFY_URL = (process.env.COMFY_URL || 'http://127.0.0.1:8188').replace(/\/
 const COMFY_DIR = (process.env.COMFY_DIR || '~/ComfyUI').replace(/^~/, os.homedir());
 const MODELS = path.join(COMFY_DIR, 'models');
 
-// What setup-local.sh downloads, sized to this machine's memory (GB from the Hugging Face listings).
+// Local model sizes the panel offers (GB from the Hugging Face listings). Same LoRAs and workflow for all.
 const RAM_GB = os.totalmem() / 2 ** 30;
-const TIER = RAM_GB >= 40 ? { q: 'Q8_0', cq: 'Q8_0', unet: 22.35, clip: 8.10, mp: 1.0 }
-  : RAM_GB >= 24 ? { q: 'Q5_K_M', cq: 'Q6_K', unet: 15.40, clip: 6.25, mp: 0.8 }
-  : { q: 'Q3_K_M', cq: 'Q4_K_M', unet: 9.92, clip: 4.68, mp: 0.6 };
-const PLAN = {
-  unet: process.env.LOCAL_UNET || `qwen-image-edit-2511-${TIER.q}.gguf`,
-  clip: process.env.LOCAL_CLIP || `Qwen2.5-VL-7B-Instruct-${TIER.cq}.gguf`,
+const TIERS = {
+  best: { label: 'Best quality', q: 'Q8_0', cq: 'Q8_0', unet: 22.35, clip: 8.10, minRam: 40 },
+  balanced: { label: 'Balanced', q: 'Q5_K_M', cq: 'Q6_K', unet: 15.40, clip: 6.25, minRam: 24 },
+  small: { label: 'Small', q: 'Q3_K_M', cq: 'Q4_K_M', unet: 9.92, clip: 4.68, minRam: 0 },
 };
-PLAN.files = [ // [folder, file, GB]
+const RECOMMENDED = RAM_GB >= 40 ? 'best' : RAM_GB >= 24 ? 'balanced' : 'small';
+const SHARED = [ // [folder, file, GB] needed by every size
   ['vae', 'qwen_image_vae.safetensors', 0.25],
   ['loras', 'qwen-image-edit-2511-multiple-angles-lora.safetensors', 0.30],
   ['loras', 'Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors', 0.85],
   ['text_encoders', 'mmproj-BF16.gguf', 1.35],
-  ['text_encoders', PLAN.clip, TIER.clip],
-  ['unet', PLAN.unet, TIER.unet],
 ];
-PLAN.gb = PLAN.files.reduce((a, f) => a + f[2], 0);
-
-// Local model files actually used: the largest quantization installed (or the plan, before install).
-const largest = (dir, re) => { try { return fs.readdirSync(dir).filter(f => re.test(f)).map(f => [f, fs.statSync(path.join(dir, f)).size]).sort((a, b) => b[1] - a[1])[0]?.[0]; } catch { return undefined; } };
+const ENGINE_GB = 1; // ComfyUI + Python packages, downloaded once
+const tierFiles = id => { const t = TIERS[id]; return [...SHARED,
+  ['text_encoders', `Qwen2.5-VL-7B-Instruct-${t.cq}.gguf`, t.clip], ['unet', `qwen-image-edit-2511-${t.q}.gguf`, t.unet]]; };
+const have = ([d, f]) => fs.existsSync(path.join(MODELS, d, f));
+const engineInstalled = () => fs.existsSync(path.join(COMFY_DIR, '.venv', 'bin', 'python'));
+const tierInstalled = id => engineInstalled() && tierFiles(id).every(have);
+const tierRemainingGb = id => tierFiles(id).filter(f => !have(f)).reduce((a, f) => a + f[2], 0) + (engineInstalled() ? 0 : ENGINE_GB);
+// Selected size: LOCAL_MODEL in .env (set by the panel), else an installed one (recommended first), else the recommended.
+const selectedTier = () => {
+  const s = env('LOCAL_MODEL');
+  if (TIERS[s]) return s;
+  return [RECOMMENDED, 'best', 'balanced', 'small'].find(tierInstalled) || RECOMMENDED;
+};
 const LOCAL = {
-  get unet() { return process.env.LOCAL_UNET || largest(path.join(MODELS, 'unet'), /^qwen-image-edit-2511-.*\.gguf$/i) || PLAN.unet; },
-  get clip() { return process.env.LOCAL_CLIP || largest(path.join(MODELS, 'text_encoders'), /^Qwen2\.5-VL-7B-Instruct-(?!.*mmproj).*\.gguf$/i) || PLAN.clip; },
+  get unet() { return process.env.LOCAL_UNET || tierFiles(selectedTier())[5][1]; },
+  get clip() { return process.env.LOCAL_CLIP || tierFiles(selectedTier())[4][1]; },
   vae: 'qwen_image_vae.safetensors',
   lightning: 'Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors',
   angles: 'qwen-image-edit-2511-multiple-angles-lora.safetensors',
-  // Output size in megapixels: 1.0 is ~1024x1024. Smaller machines default lower to stay fast and in memory.
-  megapixels: +(process.env.LOCAL_MEGAPIXELS || TIER.mp),
+  // Output size in megapixels (1.0 is ~1024x1024), set by memory: smaller machines stay fast and in memory.
+  megapixels: +(process.env.LOCAL_MEGAPIXELS || (RAM_GB >= 40 ? 1.0 : RAM_GB >= 24 ? 0.8 : 0.6)),
 };
-const localInstalled = () => fs.existsSync(path.join(COMFY_DIR, '.venv', 'bin', 'python'))
-  && fs.existsSync(path.join(MODELS, 'unet', LOCAL.unet)) && fs.existsSync(path.join(MODELS, 'text_encoders', LOCAL.clip))
-  && PLAN.files.slice(0, 4).every(([d, f]) => fs.existsSync(path.join(MODELS, d, f)));
+const localInstalled = () => engineInstalled() && have(['unet', LOCAL.unet]) && have(['text_encoders', LOCAL.clip]) && SHARED.every(have);
 
 // Selected generator: PROVIDER in .env (set by the panel), else the best one available.
 const provider = () => (env('PROVIDER') || (env('FAL_KEY') ? 'fal' : localInstalled() ? 'local' : env('HF_TOKEN') ? 'hf' : 'mock')).toLowerCase();
@@ -280,7 +284,7 @@ async function generate(p) {
 }
 
 /* ---------- one-click local setup ---------- */
-let installer = null, lastError = '', lastSecs = 0;
+let installer = null, installTier = '', lastError = '', lastSecs = 0;
 const SETUP = { state: 'idle', phase: '', log: [], error: '' }; // idle | installing | failed
 function friendly(m = '') {
   if (/TOP_UP|locked/i.test(m)) return 'Your fal.ai account needs credit. Add some at fal.ai/dashboard/billing, then try again.';
@@ -289,7 +293,7 @@ function friendly(m = '') {
 }
 function bytesOnDisk() { // finished model files + partial downloads (.incomplete) of this plan
   let n = 0;
-  for (const [d, f] of PLAN.files) { try { n += fs.lstatSync(path.join(MODELS, d, f)).size; } catch {} }
+  for (const [d, f] of tierFiles(installTier)) { try { n += fs.lstatSync(path.join(MODELS, d, f)).size; } catch {} }
   const walk = dir => { try { for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
     const p = path.join(dir, e.name);
     if (e.isDirectory()) walk(p); else if (e.name.endsWith('.incomplete')) n += fs.statSync(p).size;
@@ -297,13 +301,15 @@ function bytesOnDisk() { // finished model files + partial downloads (.incomplet
   for (const d of ['vae', 'loras', 'text_encoders', 'unet']) walk(path.join(MODELS, d, '.cache'));
   return n;
 }
-function startInstall() {
+function startInstall(id) {
   if (installer) return;
+  installTier = id;
+  const files = tierFiles(id), unet = files[5][1], clip = files[4][1];
   const rt = path.join(ROOT, '.runtime');
   const PATH = [path.join(rt, 'bin'), path.join(rt, 'node', 'bin'), path.join(os.homedir(), '.local', 'bin'), '/opt/homebrew/bin', '/usr/local/bin', process.env.PATH].join(':');
   Object.assign(SETUP, { state: 'installing', phase: 'engine', log: [], error: '' });
-  console.log(`[setup] installing local generator (${PLAN.unet}, ${PLAN.clip}, ~${PLAN.gb.toFixed(0)} GB) into ${COMFY_DIR}`);
-  installer = spawn('bash', [path.join(HERE, 'setup-local.sh')], { env: { ...process.env, PATH, COMFY_DIR, LOCAL_UNET: PLAN.unet, LOCAL_CLIP: PLAN.clip } });
+  console.log(`[setup] installing local generator: ${TIERS[id].label} (${unet}, ${clip}, ~${tierRemainingGb(id).toFixed(0)} GB to download) into ${COMFY_DIR}`);
+  installer = spawn('bash', [path.join(HERE, 'setup-local.sh')], { env: { ...process.env, PATH, COMFY_DIR, LOCAL_UNET: unet, LOCAL_CLIP: clip } });
   const onData = buf => { for (const line of buf.toString().split(/[\r\n]+/)) {
     const l = line.trim(); if (!l) continue;
     const m = /^STEP: (\w+)/.exec(l); if (m) SETUP.phase = m[1]; else SETUP.log = [...SETUP.log, l].slice(-8);
@@ -311,8 +317,9 @@ function startInstall() {
   installer.stdout.on('data', onData); installer.stderr.on('data', onData);
   installer.on('exit', code => {
     installer = null;
-    if (code === 0 && localInstalled()) {
+    if (code === 0 && tierInstalled(id)) {
       SETUP.state = 'idle'; console.log('[setup] done');
+      saveEnv({ LOCAL_MODEL: id });
       if (!env('PROVIDER') || env('PROVIDER') === 'local') { saveEnv({ PROVIDER: 'local' }); ensureComfy().catch(e => { lastError = e.message; }); }
     } else {
       Object.assign(SETUP, { state: 'failed', error: SETUP.log.slice(-3).join(' · ') || `Setup stopped (code ${code})` });
@@ -326,8 +333,11 @@ async function status() {
   const key = env('FAL_KEY');
   return {
     mode: P === 'fal' ? 'cloud' : P === 'local' ? 'local' : P, usable: usable(P), lastError, lastSecs,
-    local: { installed: localInstalled(), engine, ram: Math.round(RAM_GB), model: LOCAL.unet, gb: +PLAN.gb.toFixed(1),
-      setup: { ...SETUP, doneGb: SETUP.state === 'installing' ? +(bytesOnDisk() / 1e9).toFixed(1) : 0 } },
+    local: { installed: localInstalled(), engine, ram: Math.round(RAM_GB), model: LOCAL.unet, selected: selectedTier(), recommended: RECOMMENDED,
+      tiers: Object.entries(TIERS).map(([id, t]) => ({ id, label: t.label, quant: t.q, minRam: t.minRam, totalGb: +(t.unet + t.clip + 2.75).toFixed(1),
+        remainingGb: +tierRemainingGb(id).toFixed(1), installed: tierInstalled(id) })),
+      setup: { ...SETUP, tier: installTier, totalGb: installTier ? +tierFiles(installTier).reduce((a, f) => a + f[2], 0).toFixed(1) : 0,
+        doneGb: SETUP.state === 'installing' ? +(bytesOnDisk() / 1e9).toFixed(1) : 0 } },
     cloud: { keySet: !!key, keyHint: key ? `…${key.slice(-4)}` : '' },
   };
 }
@@ -337,7 +347,16 @@ async function setupApi(req, res, url) {
   // State-changing calls: same-origin only (custom header forces a CORS preflight that this server never allows).
   if (req.method !== 'POST' || req.headers['x-view-review'] !== '1') return send({ error: 'forbidden' }, 403);
   const body = JSON.parse((await readBody(req, 1e5)) || '{}');
-  if (url.pathname === '/api/setup/install') { startInstall(); return send(await status()); }
+  if (url.pathname === '/api/setup/install') {
+    const id = TIERS[body.model] ? body.model : RECOMMENDED;
+    startInstall(id); return send(await status());
+  }
+  if (url.pathname === '/api/setup/model') { // switch between installed sizes
+    if (!tierInstalled(body.model)) return send({ error: 'That model size is not downloaded yet.' }, 400);
+    saveEnv({ LOCAL_MODEL: body.model, PROVIDER: 'local' }); lastError = '';
+    ensureComfy().catch(e => { lastError = e.message; });
+    return send(await status());
+  }
   if (url.pathname === '/api/setup/mode') {
     const p = body.mode === 'cloud' ? 'fal' : 'local';
     saveEnv({ PROVIDER: p }); lastError = '';
