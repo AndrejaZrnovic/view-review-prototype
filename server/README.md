@@ -1,8 +1,8 @@
 # Angle generation backend
 
 Small Node server that serves the prototype (`../index.html`) and powers the **Make** page's
-"Generate view" button with a real AI model. `index.html` is not modified: the server adds a small
-**AI generator** panel (`setup-panel.js`) to the copy it serves and fills the page's existing `BACKEND` hook.
+"Generate view" and "Make video" buttons with real AI models. The server adds a small **AI generator**
+panel (`setup-panel.js`) to the copy of `index.html` it serves and fills the page's `BACKEND` hook.
 
 ## Model
 
@@ -71,6 +71,27 @@ never saw), one cleanup edit paints them out, keeping the handle, lid and other 
 letters are not caught. Views of a side that no uploaded photo shows are labelled "Side not in your photos" on the page
 and in the review step. `CLEAN_UNSEEN=0` in `server/.env` turns the guard off. Cost: one extra generation per style (local), or ~$0.03 per megapixel
 on fal.ai (`fal-ai/qwen-image-edit-2511`). The free Hugging Face Space ignores styles.
+
+## Transition video
+
+Under **5. Transition video** on the Make page, click generated views in the order the camera should visit them and press
+**Make video**. Each consecutive pair becomes one clip from Google's Veo 3.1 *first/last frame* model on fal.ai: the clip
+starts exactly on one view and ends exactly on the next, and the model films the camera move in between (like an
+architectural walkthrough). The clips run in parallel, fal's free ffmpeg merge joins them, and the MP4 is saved in
+`server/.cache/videos/` and shown on the page with a download button. "Return to the first view" adds a closing clip for a loop.
+
+| Quality | fal.ai model | Price (1080p, no audio) |
+| --- | --- | --- |
+| Fast (default) | `fal-ai/veo3.1/fast/first-last-frame-to-video` | $0.10 per second |
+| Best | `fal-ai/veo3.1/first-last-frame-to-video` | $0.20 per second |
+
+Example: Front → Right → Back at 4 seconds per move on Fast is 2 clips, 8 seconds, about $0.80. A run takes 1–3 minutes.
+**Format:** Landscape 16:9 (default) or Portrait 9:16. Veo crops frames to that shape, which would cut the lid or base
+off a portrait product shot, so each chosen view is first extended to the video's shape with fal.ai Bria Expand
+(`fal-ai/bria/expand`, $0.04 per view, skipped when a view already has that shape). "Match the views" skips this step.
+Needs the Cloud (fal.ai) generator. Views made with the same moodboard style share one scene, so pick views of one style;
+the page warns when the chosen views have different styles. The video model invents the frames between the views, so the
+product can drift mid-move: review the video like any AI-made view.
 
 ## How the UI controls are mapped
 

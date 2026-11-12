@@ -1,5 +1,6 @@
 // Backend for the Make page in ../index.html.
-// Serves the prototype and answers POST /api/generate with a new camera view of the product.
+// Serves the prototype and answers POST /api/generate with a new camera view of the product,
+// and POST /api/video with a transition video between chosen views (fal.ai Veo 3.1, see startVideo).
 //
 // Providers (picked automatically, or set PROVIDER=local|fal|hf in server/.env):
 //   local - free, runs on this computer: a quantized copy of the same model in ComfyUI (see setup-local.sh).
@@ -11,8 +12,8 @@
 //
 // The page gets a small "AI generator" panel (setup-panel.js, added to the served copy) to install the local
 // generator with one click, or switch to cloud with a fal.ai key. Choices are saved in server/.env.
-// index.html is never modified on disk: the served copy gets the panel script, and its `var BACKEND='';` hook is
-// pointed at '/api' whenever the selected generator is ready.
+// The served copy of index.html gets the panel script, and its `var BACKEND='';` hook is pointed at '/api'
+// whenever the selected generator is ready.
 
 import http from 'node:http';
 import fs from 'node:fs';
@@ -410,6 +411,112 @@ async function generate(p) {
   return { image, provider: P, styled, unseen, cleaned, reference: ref.side, relative_turn: Math.round(rel), prompt: r.prompt, seed: r.seed };
 }
 
+/* ---------- transition video (fal.ai Veo 3.1 first/last frame) ---------- */
+// Each consecutive pair of chosen views becomes one clip that starts on the first view and ends on the second.
+// The clips run in parallel on fal's queue, then fal's ffmpeg merge joins them into one MP4 kept in .cache/videos.
+const VIDEO_MODELS = { fast: 'fal-ai/veo3.1/fast/first-last-frame-to-video', best: 'fal-ai/veo3.1/first-last-frame-to-video' };
+const VIDEO_RATE = { fast: 0.10, best: 0.20 }; // USD per second at 720p/1080p without audio
+const VIDEO_DIR = path.join(HERE, '.cache', 'videos');
+const VIDEOS = new Map(); // id -> job
+const VIDEO_NEG = 'cuts, scene change, morphing product, warping, melting, changing shape, changing colour, extra objects, people, hands, '
+  + 'new text, new logos, labels changing, watermark, flicker, shaky camera, fast motion';
+
+async function falQueue(model, input, onStatus) {
+  const H = { Authorization: `Key ${env('FAL_KEY')}`, 'Content-Type': 'application/json' };
+  const r = await fetch(`https://queue.fal.run/${model}`, { method: 'POST', headers: H, body: JSON.stringify(input) });
+  const q = await r.json().catch(() => ({}));
+  if (!r.ok || !q.status_url) throw new Error(`fal.ai ${r.status}: ${JSON.stringify(q).slice(0, 400)}`);
+  for (let i = 0; i < 400; i++) { // up to ~20 minutes
+    await new Promise(s => setTimeout(s, 3000));
+    const s = await (await fetch(q.status_url, { headers: H })).json().catch(() => ({}));
+    onStatus?.(s.status);
+    if (s.status === 'COMPLETED') break;
+  }
+  const o = await fetch(q.response_url, { headers: H });
+  const j = await o.json().catch(() => ({}));
+  if (!o.ok || !j.video?.url) throw new Error(`fal.ai ${o.status}: ${JSON.stringify(j.detail || j).slice(0, 400)}`);
+  return j.video.url;
+}
+
+const turnWords = (a, b) => { // how the camera moves between two views, for the video prompt
+  const d = ((b.az - a.az) % 360 + 540) % 360 - 180, e = b.el - a.el, w = [];
+  if (Math.abs(d) >= 10) w.push(`orbits ${Math.abs(Math.round(d))} degrees around the product`);
+  if (e >= 10) w.push('rises to look down on it'); else if (e <= -10) w.push('lowers to look up at it');
+  if (b.dist - a.dist >= 15) w.push('pulls back'); else if (a.dist - b.dist >= 15) w.push('moves closer');
+  return w.length ? w.join(', then ') : 'drifts gently around the product';
+};
+function videoPrompt(a, b) {
+  return `Smooth, slow, continuous cinematic camera move in one unbroken shot: the camera ${turnWords(a, b)}, `
+    + `travelling from the ${a.name || 'first'} view to the ${b.name || 'second'} view. The product is a rigid, solid object that stays `
+    + 'perfectly still and unchanged: same shape, proportions, materials, colours and markings. The scene, background and lighting stay '
+    + 'consistent and only the camera moves. Professional product turntable video, stable motion, no cuts, no new text, logos, objects or people.';
+}
+
+function imageSize(dataUrl) { // width/height of a PNG or JPEG data URL, without dependencies
+  const b = Buffer.from(dataUrl.slice(dataUrl.indexOf(',') + 1, dataUrl.indexOf(',') + 1 + 400000), 'base64');
+  if (b.readUInt32BE(0) === 0x89504e47) return { w: b.readUInt32BE(16), h: b.readUInt32BE(20) };
+  for (let i = 2; i + 9 < b.length;) { // JPEG: walk the markers to the frame header
+    if (b[i] !== 0xff) { i++; continue; }
+    const m = b[i + 1];
+    if (m >= 0xc0 && m <= 0xcf && ![0xc4, 0xc8, 0xcc].includes(m)) return { w: b.readUInt16BE(i + 7), h: b.readUInt16BE(i + 5) };
+    i += 2 + b.readUInt16BE(i + 2);
+  }
+  return null;
+}
+// Veo crops frames to 16:9 or 9:16, which cuts the product off a portrait view in a landscape video. So first extend
+// each view's scene to the video's shape (fal.ai Bria Expand, $0.04): the product stays whole and every clip that
+// starts or ends on that view uses the same widened image.
+async function fitFrame(image, aspect) {
+  const s = imageSize(image), R = aspect === '16:9' ? 16 / 9 : 9 / 16;
+  if (!s || Math.abs(s.w / s.h - R) / R < 0.03) return image;
+  const W = s.w / s.h < R ? Math.round(s.h * R) : s.w, H = s.w / s.h < R ? s.h : Math.round(s.w / R);
+  const r = await fetch('https://fal.run/fal-ai/bria/expand', {
+    method: 'POST', headers: { Authorization: `Key ${env('FAL_KEY')}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ image_url: image, canvas_size: [W, H], original_image_size: [s.w, s.h],
+      original_image_location: [Math.round((W - s.w) / 2), Math.round((H - s.h) / 2)],
+      prompt: 'continue the same scene and lighting naturally', negative_prompt: 'text, logo, people, another product, duplicate object, frame, border' }),
+  });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok || !j.image?.url) throw new Error(`fal.ai ${r.status}: ${JSON.stringify(j.detail || j).slice(0, 400)}`);
+  return urlToDataUrl(j.image.url);
+}
+
+function startVideo(p) {
+  if (!env('FAL_KEY')) throw new Error('Transition videos need the Cloud (fal.ai) generator: add a fal.ai key in the panel at the top.');
+  let views = (p.views || []).filter(v => /^data:image\//.test(v.image || ''));
+  if (views.length < 2) throw new Error('Choose at least two views.');
+  if (views.length > 9) throw new Error('Choose at most nine views.');
+  const quality = p.quality === 'best' ? 'best' : 'fast', dur = ['4s', '6s', '8s'].includes(p.duration) ? p.duration : '4s';
+  const aspect = ['16:9', '9:16'].includes(p.aspect) ? p.aspect : 'auto';
+  const clips = views.length - 1 + (p.loop && views.length > 2 ? 1 : 0);
+  const id = crypto.randomBytes(6).toString('hex');
+  const job = { id, state: 'running', phase: aspect === 'auto' ? 'clips' : 'fit', total: clips, done: 0, started: 0, error: '',
+    t0: Date.now(), secs: 0, cost: +(clips * parseInt(dur) * VIDEO_RATE[quality] + (aspect === 'auto' ? 0 : views.length * 0.04)).toFixed(2),
+    quality, duration: dur, aspect };
+  VIDEOS.set(id, job);
+  (async () => {
+    if (aspect !== 'auto') views = await Promise.all(views.map(async v => ({ ...v, image: await fitFrame(v.image, aspect) })));
+    job.phase = 'clips';
+    const pairs = views.slice(1).map((b, i) => [views[i], b]);
+    if (clips > views.length - 1) pairs.push([views[views.length - 1], views[0]]);
+    const urls = await Promise.all(pairs.map(([a, b]) => {
+      let seen = false;
+      return falQueue(VIDEO_MODELS[quality], {
+        prompt: videoPrompt(a, b), negative_prompt: VIDEO_NEG, first_frame_url: a.image, last_frame_url: b.image,
+        duration: dur, resolution: '1080p', aspect_ratio: aspect, generate_audio: false,
+      }, s => { if (s === 'IN_PROGRESS' && !seen) { seen = true; job.started++; } }).then(u => { job.done++; return u; });
+    }));
+    const url = urls.length > 1 ? await falQueue('fal-ai/ffmpeg-api/merge-videos', { video_urls: urls }) : urls[0];
+    const r = await fetch(url);
+    if (!r.ok) throw new Error(`Could not download the video (${r.status})`);
+    fs.mkdirSync(VIDEO_DIR, { recursive: true });
+    fs.writeFileSync(path.join(VIDEO_DIR, `${id}.mp4`), Buffer.from(await r.arrayBuffer()));
+    Object.assign(job, { state: 'done', file: `/api/video/${id}.mp4`, secs: Math.round((Date.now() - job.t0) / 1000) });
+    console.log(`[video] ${pairs.length} clip(s), ${quality} ${dur} ${aspect}, about $${job.cost}, in ${job.secs}s`);
+  })().catch(e => { console.error('[video]', e.message); Object.assign(job, { state: 'failed', error: friendly(e.message) }); });
+  return job;
+}
+
 /* ---------- one-click local setup ---------- */
 let installer = null, installTier = '', lastError = '', lastSecs = 0;
 const SETUP = { state: 'idle', phase: '', log: [], error: '' }; // idle | installing | failed
@@ -518,6 +625,30 @@ const server = http.createServer(async (req, res) => {
       const out = await generate(JSON.parse(await readBody(req)));
       res.writeHead(200, { 'Content-Type': 'application/json' });
       return res.end(JSON.stringify(out));
+    }
+    if (url.pathname === '/api/video' && req.method === 'POST') {
+      res.setHeader('Content-Type', 'application/json');
+      if (req.headers['x-view-review'] !== '1') { res.writeHead(403); return res.end('{"error":"Forbidden"}'); } // paid: same-page only
+      try { const job = startVideo(JSON.parse(await readBody(req))); return res.end(JSON.stringify(job)); }
+      catch (e) { res.writeHead(400); return res.end(JSON.stringify({ error: e.message })); }
+    }
+    let vm = /^\/api\/video\/([0-9a-f]{12})(\.mp4)?$/.exec(url.pathname);
+    if (vm && req.method === 'GET') {
+      if (vm[2]) {
+        const f = path.join(VIDEO_DIR, `${vm[1]}.mp4`);
+        if (!fs.existsSync(f)) { res.writeHead(404); return res.end(); }
+        const size = fs.statSync(f).size, range = /bytes=(\d*)-(\d*)/.exec(req.headers.range || '');
+        if (range) { // Safari needs range requests to play video
+          const start = range[1] ? +range[1] : size - +range[2], end = range[1] && range[2] ? +range[2] : size - 1;
+          res.writeHead(206, { 'Content-Type': 'video/mp4', 'Accept-Ranges': 'bytes', 'Content-Range': `bytes ${start}-${end}/${size}`, 'Content-Length': end - start + 1 });
+          return fs.createReadStream(f, { start, end }).pipe(res);
+        }
+        res.writeHead(200, { 'Content-Type': 'video/mp4', 'Accept-Ranges': 'bytes', 'Content-Length': size });
+        return fs.createReadStream(f).pipe(res);
+      }
+      const job = VIDEOS.get(vm[1]);
+      res.writeHead(job ? 200 : 404, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify(job || { error: 'Unknown video' }));
     }
     if (req.method !== 'GET') { res.writeHead(405); return res.end(); }
     // Static files from the repo root; server/ internals stay private.
