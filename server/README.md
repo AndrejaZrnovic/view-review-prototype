@@ -49,6 +49,22 @@ The choice is saved as `LOCAL_MODEL` (best / balanced / small) in `server/.env`.
 `LOCAL_MEGAPIXELS`. `bash server/setup-local.sh`
 runs the same install from a terminal.
 
+## Moodboard styles
+
+When a style is applied on the Make page (**2. Style moodboard → Apply Style**), each request carries the
+selected tiles' scene and mood descriptions, plus any image you uploaded with **Add your own image**.
+The server then works in two steps:
+
+1. **Style:** the front photo (or the first one uploaded) is restyled with the plain Qwen-Image-Edit-2511 model,
+   without the angle add-on: same product, new background, surface and lighting. An uploaded style image goes in as a
+   second reference. Any other photo used for an angle is placed "in the same scene as" that styled front photo.
+   Styled photos are cached, so this runs once per style.
+2. **Angle:** the usual camera step runs on the styled photo. If the requested view equals the photo's own angle,
+   the styled photo is returned as-is.
+
+So all views of a set share one scene. Cost: one extra generation per style (local), or ~$0.03 per megapixel
+on fal.ai (`fal-ai/qwen-image-edit-2511`). The free Hugging Face Space ignores styles.
+
 ## How the UI controls are mapped
 
 - **Reference photo:** the uploaded side (front/right/back/left) nearest the requested rotation; the

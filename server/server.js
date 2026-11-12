@@ -19,6 +19,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { spawn } from 'node:child_process';
+import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { Client } from '@gradio/client';
 
@@ -198,12 +199,13 @@ async function ensureComfy() {
 }
 for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(sig, () => { comfyProc?.kill(); installer?.kill(); process.exit(0); });
 
-function comfyWorkflow(imageName, prompt, seed) {
-  // Same graph as fal's published comfyui-workflow-multiple-angles.json, with GGUF loaders for a 16 GB Mac.
-  return {
+// Same graph as fal's published comfyui-workflow-multiple-angles.json, with GGUF loaders.
+// angles=false gives the plain edit model (used for the style step); image2 is an optional second reference.
+function comfyWorkflow(imageName, prompt, seed, { angles = true, image2 = null } = {}) {
+  const w = {
     unet: { class_type: 'UnetLoaderGGUF', inputs: { unet_name: LOCAL.unet } },
     angles: { class_type: 'LoraLoaderModelOnly', inputs: { model: ['unet', 0], lora_name: LOCAL.angles, strength_model: 0.9 } },
-    lightning: { class_type: 'LoraLoaderModelOnly', inputs: { model: ['angles', 0], lora_name: LOCAL.lightning, strength_model: 1 } },
+    lightning: { class_type: 'LoraLoaderModelOnly', inputs: { model: angles ? ['angles', 0] : ['unet', 0], lora_name: LOCAL.lightning, strength_model: 1 } },
     shift: { class_type: 'ModelSamplingAuraFlow', inputs: { model: ['lightning', 0], shift: 3.1 } },
     cfgnorm: { class_type: 'CFGNorm', inputs: { model: ['shift', 0], strength: 1 } },
     clip: { class_type: 'CLIPLoaderGGUF', inputs: { clip_name: LOCAL.clip, type: 'qwen_image' } },
@@ -217,22 +219,30 @@ function comfyWorkflow(imageName, prompt, seed) {
     latent: { class_type: 'VAEEncode', inputs: { pixels: ['scale', 0], vae: ['vae', 0] } },
     sample: { class_type: 'KSampler', inputs: { model: ['cfgnorm', 0], positive: ['posref', 0], negative: ['negref', 0], latent_image: ['latent', 0], seed, steps: 4, cfg: 1, sampler_name: 'euler', scheduler: 'simple', denoise: 1 } },
     decode: { class_type: 'VAEDecode', inputs: { samples: ['sample', 0], vae: ['vae', 0] } },
-    save: { class_type: 'SaveImage', inputs: { images: ['decode', 0], filename_prefix: 'view-review/angle' } },
+    save: { class_type: 'SaveImage', inputs: { images: ['decode', 0], filename_prefix: angles ? 'view-review/angle' : 'view-review/style' } },
   };
+  if (!angles) delete w.angles;
+  if (image2) {
+    w.load2 = { class_type: 'LoadImage', inputs: { image: image2 } };
+    w.scale2 = { class_type: 'ImageScaleToTotalPixels', inputs: { image: ['load2', 0], upscale_method: 'lanczos', megapixels: 0.4, resolution_steps: 16 } };
+    w.pos.inputs.image2 = ['scale2', 0]; w.neg.inputs.image2 = ['scale2', 0];
+  }
+  return w;
 }
 
-async function viaLocal(p, ref, rel) {
-  await ensureComfy();
+async function comfyUpload(dataUrl) {
   const form = new FormData();
-  const blob = dataUrlToBlob(ref.image);
-  form.append('image', blob, `ref-${Date.now()}.${(blob.type.split('/')[1] || 'png').replace('jpeg', 'jpg')}`);
+  const blob = dataUrlToBlob(dataUrl);
+  form.append('image', blob, `ref-${Date.now()}-${Math.random().toString(36).slice(2, 7)}.${(blob.type.split('/')[1] || 'png').replace('jpeg', 'jpg')}`);
   form.append('overwrite', 'true');
-  const up = await (await fetch(`${COMFY_URL}/upload/image`, { method: 'POST', body: form })).json();
-  const prompt = lockedPrompt(rel, p), seed = Math.floor(Math.random() * 2 ** 31);
-  const q = await fetch(`${COMFY_URL}/prompt`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ prompt: comfyWorkflow(up.name, prompt, seed) }) });
+  return (await (await fetch(`${COMFY_URL}/upload/image`, { method: 'POST', body: form })).json()).name;
+}
+
+async function comfyRun(workflow) {
+  const q = await fetch(`${COMFY_URL}/prompt`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ prompt: workflow }) });
   const qj = await q.json();
   if (!q.ok || !qj.prompt_id) throw new Error(`ComfyUI rejected the workflow: ${JSON.stringify(qj.node_errors || qj.error || qj).slice(0, 500)}`);
-  for (let i = 0; i < 1200; i++) { // up to 20 minutes
+  for (let i = 0; i < 1500; i++) { // up to 25 minutes
     await new Promise(r => setTimeout(r, 1000));
     const h = (await (await fetch(`${COMFY_URL}/history/${qj.prompt_id}`)).json())[qj.prompt_id];
     if (!h) continue;
@@ -241,9 +251,62 @@ async function viaLocal(p, ref, rel) {
       throw new Error(`ComfyUI error: ${m ? m[1].exception_message : 'unknown'}`);
     }
     const img = h.outputs?.save?.images?.[0];
-    if (img) return { url: `${COMFY_URL}/view?${new URLSearchParams({ filename: img.filename, subfolder: img.subfolder, type: img.type })}`, prompt, seed };
+    if (img) return `${COMFY_URL}/view?${new URLSearchParams({ filename: img.filename, subfolder: img.subfolder, type: img.type })}`;
   }
-  throw new Error('Local generation timed out after 20 minutes');
+  throw new Error('Local generation timed out after 25 minutes');
+}
+
+async function viaLocal(p, ref, rel) {
+  await ensureComfy();
+  const prompt = lockedPrompt(rel, p), seed = Math.floor(Math.random() * 2 ** 31);
+  return { url: await comfyRun(comfyWorkflow(await comfyUpload(ref.image), prompt, seed)), prompt, seed };
+}
+
+/* ---------- style step (moodboard) ---------- */
+// The moodboard sends { environment: [...], mood: [...], images: [dataUrl...] }. The product photo is restyled
+// once (plain edit model, no angle LoRA), cached, and every angle is then generated from the styled photo, so all
+// views share one scene. Extra reference photos are placed "in the same scene as" the styled anchor photo.
+const hasStyle = st => !!st && ((st.environment || []).some(Boolean) || (st.mood || []).some(Boolean) || (st.images || []).length > 0);
+function stylePrompt(st, sceneFromStyled) {
+  const env = (st.environment || []).filter(Boolean);
+  const mood = [...new Set((st.mood || []).join(',').split(',').map(x => x.trim()).filter(Boolean))];
+  const keep = ' Keep the product itself exactly the same: shape, proportions, colours, materials, logo and text. Change only the background, surface and lighting. Keep the same camera angle and framing. Photorealistic product photograph, sharp focus on the product.';
+  if (sceneFromStyled) return 'Place the exact product from Picture 1 into the same scene, surface, lighting and colour grading as Picture 2.' + keep;
+  return 'Place the exact product from Picture 1 in a new professional product photo.'
+    + (env.length ? ` Scene: ${env.join('; ')}.` : '') + (mood.length ? ` Mood: ${mood.join(', ')}.` : '')
+    + ((st.images || []).length ? ' Match the setting, lighting and colour palette of Picture 2 without copying any of its objects.' : '') + keep;
+}
+const styleCache = new Map();
+const hash = s => crypto.createHash('sha1').update(s).digest('hex');
+async function styleOne(P, image, scene, prompt) {
+  const key = hash([P, LOCAL.unet, image, scene || '', prompt].join('|'));
+  if (styleCache.has(key)) return styleCache.get(key);
+  const t0 = Date.now();
+  let url;
+  if (P === 'local') {
+    await ensureComfy();
+    const img1 = await comfyUpload(image), img2 = scene ? await comfyUpload(scene) : null;
+    url = await comfyRun(comfyWorkflow(img1, prompt, Math.floor(Math.random() * 2 ** 31), { angles: false, image2: img2 }));
+  } else {
+    const r = await fetch('https://fal.run/fal-ai/qwen-image-edit-2511', {
+      method: 'POST', headers: { Authorization: `Key ${env('FAL_KEY')}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt, image_urls: scene ? [image, scene] : [image], output_format: 'png', num_images: 1 }),
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || !j.images?.[0]?.url) throw new Error(`fal.ai ${r.status}: ${JSON.stringify(j).slice(0, 400)}`);
+    url = j.images[0].url;
+  }
+  const out = await urlToDataUrl(url);
+  console.log(`[style] ${P} in ${((Date.now() - t0) / 1000).toFixed(1)}s :: ${prompt.slice(0, 120)}…`);
+  if (styleCache.size > 30) styleCache.delete(styleCache.keys().next().value);
+  styleCache.set(key, out);
+  return out;
+}
+async function styledReference(P, images, ref, st) {
+  const anchor = images.find(i => i.side === 'front') || images[0];
+  const anchorStyled = await styleOne(P, anchor.image, (st.images || [])[0] || null, stylePrompt(st, false));
+  if (ref.image === anchor.image) return { ...ref, image: anchorStyled };
+  return { ...ref, image: await styleOne(P, ref.image, anchorStyled, stylePrompt(st, true)) };
 }
 
 /* ---------- helpers ---------- */
@@ -272,15 +335,22 @@ async function generate(p) {
   if (!Array.isArray(p.images) || !p.images.length) throw new Error('No reference images');
   const az = ((+p.azimuth || 0) % 360 + 360) % 360;
   const q = { azimuth: az, elevation: +p.elevation || 0, distance: +(p.distance ?? 50), roll: +p.roll || 0, lens_mm: +p.lens_mm || 50 };
-  const { ref, rel } = pickReference(p.images, az);
+  let { ref, rel } = pickReference(p.images, az);
   const t0 = Date.now();
   const P = provider(), run = { fal: viaFal, hf: viaHf, local: viaLocal }[P];
   if (!run || !usable(P)) throw new Error('No AI generator is ready: set one up in the panel at the top of the page');
+  const styled = hasStyle(p.style) && P !== 'hf'; // the free HF Space only runs the angle model
   let r;
-  try { r = await run(q, ref, rel); lastError = ''; lastSecs = Math.round((Date.now() - t0) / 1000); } catch (e) { lastError = friendly(e.message); throw e; }
-  const image = await urlToDataUrl(r.url);
-  console.log(`[generate] ${P} az=${az} el=${q.elevation} from ${ref.side} (turn ${Math.round(rel)}) in ${((Date.now() - t0) / 1000).toFixed(1)}s :: ${r.prompt || ''}`);
-  return { image, provider: P, reference: ref.side, relative_turn: Math.round(rel), prompt: r.prompt, seed: r.seed };
+  try {
+    if (styled) ref = await styledReference(P, p.images, ref, p.style);
+    // Styled and already at the requested angle: the styled photo is the answer.
+    const sameView = Math.abs(rel) < 23 && Math.abs(q.elevation) < 15 && q.distance >= 30 && q.distance < 70;
+    r = styled && sameView ? { url: ref.image, prompt: '(style only)' } : await run(q, ref, rel);
+    lastError = ''; lastSecs = Math.round((Date.now() - t0) / 1000);
+  } catch (e) { lastError = friendly(e.message); throw e; }
+  const image = r.url.startsWith('data:') ? r.url : await urlToDataUrl(r.url);
+  console.log(`[generate] ${P}${styled ? ' +style' : ''} az=${az} el=${q.elevation} from ${ref.side} (turn ${Math.round(rel)}) in ${((Date.now() - t0) / 1000).toFixed(1)}s :: ${r.prompt || ''}`);
+  return { image, provider: P, styled, reference: ref.side, relative_turn: Math.round(rel), prompt: r.prompt, seed: r.seed };
 }
 
 /* ---------- one-click local setup ---------- */
