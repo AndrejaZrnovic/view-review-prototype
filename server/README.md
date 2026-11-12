@@ -62,7 +62,14 @@ The server then works in two steps:
 2. **Angle:** the usual camera step runs on the styled photo. If the requested view equals the photo's own angle,
    the styled photo is returned as-is.
 
-So all views of a set share one scene. Cost: one extra generation per style (local), or ~$0.03 per megapixel
+So all views of a set share one scene. Styled photos are also saved in `server/.cache/` (git-ignored), so the
+scene survives a restart.
+
+**Invented text guard (fal.ai key needed):** after every style and angle step, the result is read with fal.ai's free
+Florence-2 OCR. If it shows words that aren't in the uploaded photos (the model likes to invent brand names on sides it
+never saw), one cleanup edit paints them out, keeping the handle, lid and other physical parts. Symbols without
+letters are not caught. Views of a side that no uploaded photo shows are labelled "Side not in your photos" on the page
+and in the review step. `CLEAN_UNSEEN=0` in `server/.env` turns the guard off. Cost: one extra generation per style (local), or ~$0.03 per megapixel
 on fal.ai (`fal-ai/qwen-image-edit-2511`). The free Hugging Face Space ignores styles.
 
 ## How the UI controls are mapped

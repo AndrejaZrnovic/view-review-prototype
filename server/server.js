@@ -130,7 +130,7 @@ async function viaFal(p, ref, rel) {
     vertical_angle: clamp(Math.round(p.elevation), -30, 90),
     zoom: +clamp(10 - p.distance / 10, 0, 10).toFixed(1), // UI: 0 = close, 100 = far; fal: 0 = wide, 10 = close-up
     additional_prompt: styleHints(p),
-    negative_prompt: 'added text, letters, words, logo, brand name, label, watermark', // sides the camera never saw tend to get invented branding
+    negative_prompt: NO_TEXT_NEG, // sides the camera never saw tend to get invented branding
     output_format: 'png',
     num_images: 1,
   };
@@ -277,32 +277,83 @@ function stylePrompt(st, sceneFromStyled) {
     + (env.length ? ` Scene: ${env.join('; ')}.` : '') + (mood.length ? ` Mood: ${mood.join(', ')}.` : '')
     + ((st.images || []).length ? ' Match the setting, lighting and colour palette of Picture 2 without copying any of its objects.' : '') + keep;
 }
-const styleCache = new Map();
-const hash = s => crypto.createHash('sha1').update(s).digest('hex');
-async function styleOne(P, image, scene, prompt) {
-  const key = hash([P, LOCAL.unet, image, scene || '', prompt].join('|'));
-  if (styleCache.has(key)) return styleCache.get(key);
-  const t0 = Date.now();
-  let url;
+// One plain edit with Qwen-Image-Edit-2511 (no angle LoRA): local ComfyUI or fal.ai. Returns a data URL.
+async function plainEdit(P, image, prompt, scene = null) {
   if (P === 'local') {
     await ensureComfy();
     const img1 = await comfyUpload(image), img2 = scene ? await comfyUpload(scene) : null;
-    url = await comfyRun(comfyWorkflow(img1, prompt, Math.floor(Math.random() * 2 ** 31), { angles: false, image2: img2 }));
-  } else {
-    const r = await fetch('https://fal.run/fal-ai/qwen-image-edit-2511', {
-      method: 'POST', headers: { Authorization: `Key ${env('FAL_KEY')}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ prompt, image_urls: scene ? [image, scene] : [image], output_format: 'png', num_images: 1 }),
-    });
-    const j = await r.json().catch(() => ({}));
-    if (!r.ok || !j.images?.[0]?.url) throw new Error(`fal.ai ${r.status}: ${JSON.stringify(j).slice(0, 400)}`);
-    url = j.images[0].url;
+    return urlToDataUrl(await comfyRun(comfyWorkflow(img1, prompt, Math.floor(Math.random() * 2 ** 31), { angles: false, image2: img2 })));
   }
-  const out = await urlToDataUrl(url);
+  const r = await fetch('https://fal.run/fal-ai/qwen-image-edit-2511', {
+    method: 'POST', headers: { Authorization: `Key ${env('FAL_KEY')}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ prompt, image_urls: scene ? [image, scene] : [image], negative_prompt: NO_TEXT_NEG, output_format: 'png', num_images: 1 }),
+  });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok || !j.images?.[0]?.url) throw new Error(`fal.ai ${r.status}: ${JSON.stringify(j).slice(0, 400)}`);
+  return urlToDataUrl(j.images[0].url);
+}
+const NO_TEXT_NEG = 'added text, letters, words, numbers, logo, icon, brand name, label, sticker, watermark';
+
+// Styled photos are cached in memory and on disk (server/.cache, git-ignored), so a set keeps its scene across restarts.
+const styleCache = new Map();
+const STYLE_DIR = path.join(HERE, '.cache', 'styles');
+const hash = s => crypto.createHash('sha1').update(s).digest('hex');
+async function styleOne(P, image, scene, prompt) {
+  const key = hash([P === 'local' ? 'local:' + LOCAL.unet : P, image, scene || '', prompt].join('|'));
+  if (styleCache.has(key)) return styleCache.get(key);
+  const file = path.join(STYLE_DIR, key + '.png');
+  if (fs.existsSync(file)) { const d = 'data:image/png;base64,' + fs.readFileSync(file).toString('base64'); styleCache.set(key, d); return d; }
+  const t0 = Date.now();
+  const out = (await guardText(P, await plainEdit(P, image, prompt, scene), [image])).image;
   console.log(`[style] ${P} in ${((Date.now() - t0) / 1000).toFixed(1)}s :: ${prompt.slice(0, 120)}…`);
+  try { fs.mkdirSync(STYLE_DIR, { recursive: true }); fs.writeFileSync(file, Buffer.from(out.split(',')[1], 'base64')); } catch {}
   if (styleCache.size > 30) styleCache.delete(styleCache.keys().next().value);
   styleCache.set(key, out);
   return out;
 }
+
+/* ---------- unseen sides ---------- */
+// A view whose direction is 60°+ from every uploaded side photo shows a side nobody photographed: its details are
+// invented, and the page labels it. Invented words anywhere are caught by the text guard below
+// (CLEAN_UNSEEN=0 in server/.env turns the guard off).
+function unseenSide(images, az, el) {
+  if (el > 60 && images.some(i => i.side === 'top')) return false;
+  if (el < -45 && images.some(i => i.side === 'bottom')) return false;
+  const sides = images.filter(i => i.side in SIDE_AZ);
+  if (!sides.length) return true;
+  return Math.min(...sides.map(i => Math.abs(angD(SIDE_AZ[i.side], az)))) >= 60;
+}
+const CLEAN_PROMPT = 'Remove only flat printed graphics from the product surface: words, letters, numbers, logos and icons. Paint over them with the same colour, gradient and finish as the surrounding surface. Do not remove, move or change any physical part of the product: the handle, lid, spout, rim, base and all edges must stay exactly as they are. Keep the background, lighting, framing and camera angle identical.';
+
+// Text guard: read the text in a result (fal.ai Florence-2 OCR, free, ~2 s) and, if it shows words that are not in
+// the uploaded photos, run one cleanup edit. Without a fal.ai key there is no OCR, so nothing is cleaned.
+const ocrCache = new Map();
+const letters = s => String(s || '').replace(/[^A-Za-z0-9]/g, '').toLowerCase();
+async function ocr(image) {
+  const key = hash(image);
+  if (ocrCache.has(key)) return ocrCache.get(key);
+  const r = await fetch('https://fal.run/fal-ai/florence-2-large/ocr', {
+    method: 'POST', headers: { Authorization: `Key ${env('FAL_KEY')}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ image_url: image }),
+  });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(`fal.ai OCR ${r.status}`);
+  const t = letters(j.results);
+  if (ocrCache.size > 200) ocrCache.delete(ocrCache.keys().next().value);
+  ocrCache.set(key, t);
+  return t;
+}
+async function guardText(P, image, refs) {
+  if (!env('FAL_KEY') || env('CLEAN_UNSEEN') === '0') return { image, cleaned: false };
+  try {
+    const found = await ocr(image);
+    if (found.length < 2) return { image, cleaned: false };
+    const known = (await Promise.all(refs.map(ocr))).join(' ');
+    if (known.includes(found)) return { image, cleaned: false };
+    console.log(`[text guard] invented text "${found}" -> cleaning`);
+    return { image: await plainEdit(P, image, CLEAN_PROMPT), cleaned: true };
+  } catch (e) { console.error('[text guard]', e.message); return { image, cleaned: false }; }
+}
+
 async function styledReference(P, images, ref, st) {
   const anchor = images.find(i => i.side === 'front') || images[0];
   const anchorStyled = await styleOne(P, anchor.image, (st.images || [])[0] || null, stylePrompt(st, false));
@@ -341,17 +392,22 @@ async function generate(p) {
   const P = provider(), run = { fal: viaFal, hf: viaHf, local: viaLocal }[P];
   if (!run || !usable(P)) throw new Error('No AI generator is ready: set one up in the panel at the top of the page');
   const styled = hasStyle(p.style) && P !== 'hf'; // the free HF Space only runs the angle model
-  let r;
+  const unseen = unseenSide(p.images, az, q.elevation);
+  let r, cleaned = false;
   try {
     if (styled) ref = await styledReference(P, p.images, ref, p.style);
     // Styled and already at the requested angle: the styled photo is the answer.
     const sameView = Math.abs(rel) < 23 && Math.abs(q.elevation) < 15 && q.distance >= 30 && q.distance < 70;
     r = styled && sameView ? { url: ref.image, prompt: '(style only)' } : await run(q, ref, rel);
+    if (P !== 'hf') { // the free HF Space has no plain edit model
+      const g = await guardText(P, r.url.startsWith('data:') ? r.url : await urlToDataUrl(r.url), p.images.map(i => i.image));
+      r = { ...r, url: g.image }; cleaned = g.cleaned;
+    }
     lastError = ''; lastSecs = Math.round((Date.now() - t0) / 1000);
   } catch (e) { lastError = friendly(e.message); throw e; }
   const image = r.url.startsWith('data:') ? r.url : await urlToDataUrl(r.url);
-  console.log(`[generate] ${P}${styled ? ' +style' : ''} az=${az} el=${q.elevation} from ${ref.side} (turn ${Math.round(rel)}) in ${((Date.now() - t0) / 1000).toFixed(1)}s :: ${r.prompt || ''}`);
-  return { image, provider: P, styled, reference: ref.side, relative_turn: Math.round(rel), prompt: r.prompt, seed: r.seed };
+  console.log(`[generate] ${P}${styled ? ' +style' : ''}${cleaned ? ' +clean' : ''} az=${az} el=${q.elevation} from ${ref.side} (turn ${Math.round(rel)}) in ${((Date.now() - t0) / 1000).toFixed(1)}s :: ${r.prompt || ''}`);
+  return { image, provider: P, styled, unseen, cleaned, reference: ref.side, relative_turn: Math.round(rel), prompt: r.prompt, seed: r.seed };
 }
 
 /* ---------- one-click local setup ---------- */
