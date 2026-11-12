@@ -115,7 +115,7 @@ function pickReference(images, az) {
 }
 
 function styleHints(p) {
-  const h = ['Keep the product\'s shape, colours, logo, text and proportions identical'];
+  const h = ['Keep the product\'s shape, colours, logo, text and proportions identical. Do not add any logo, brand name, text or label that is not on the product in the photo'];
   if (p.lens_mm <= 30) h.push('wide-angle lens');
   else if (p.lens_mm >= 70) h.push('telephoto lens');
   if (Math.abs(p.roll) > 3) h.push(`camera tilted ${Math.round(p.roll)} degrees`);
@@ -130,6 +130,7 @@ async function viaFal(p, ref, rel) {
     vertical_angle: clamp(Math.round(p.elevation), -30, 90),
     zoom: +clamp(10 - p.distance / 10, 0, 10).toFixed(1), // UI: 0 = close, 100 = far; fal: 0 = wide, 10 = close-up
     additional_prompt: styleHints(p),
+    negative_prompt: 'added text, letters, words, logo, brand name, label, watermark', // sides the camera never saw tend to get invented branding
     output_format: 'png',
     num_images: 1,
   };
@@ -270,7 +271,7 @@ const hasStyle = st => !!st && ((st.environment || []).some(Boolean) || (st.mood
 function stylePrompt(st, sceneFromStyled) {
   const env = (st.environment || []).filter(Boolean);
   const mood = [...new Set((st.mood || []).join(',').split(',').map(x => x.trim()).filter(Boolean))];
-  const keep = ' Keep the product itself exactly the same: shape, proportions, colours, materials, logo and text. Change only the background, surface and lighting. Keep the same camera angle and framing. Photorealistic product photograph, sharp focus on the product.';
+  const keep = ' Keep the product itself exactly the same: shape, proportions, colours, materials, and any logo or text it already has. Do not add any logo, brand name, text or label that is not visible on the product in Picture 1. Change only the background, surface and lighting. Keep the same camera angle and framing. Photorealistic product photograph, sharp focus on the product.';
   if (sceneFromStyled) return 'Place the exact product from Picture 1 into the same scene, surface, lighting and colour grading as Picture 2.' + keep;
   return 'Place the exact product from Picture 1 in a new professional product photo.'
     + (env.length ? ` Scene: ${env.join('; ')}.` : '') + (mood.length ? ` Mood: ${mood.join(', ')}.` : '')
