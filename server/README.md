@@ -72,6 +72,13 @@ letters are not caught. Views of a side that no uploaded photo shows are labelle
 and in the review step. `CLEAN_UNSEEN=0` in `server/.env` turns the guard off. Cost: one extra generation per style (local), or ~$0.03 per megapixel
 on fal.ai (`fal-ai/qwen-image-edit-2511`). The free Hugging Face Space ignores styles.
 
+## Your work is kept
+
+The Make page saves its state in the browser (IndexedDB): uploaded photos, generated views, the moodboard choice, the
+product sheet, the camera, the video order and the last video. A reload, a closed tab or an app restart brings it back.
+It stays in that browser on that Mac only. **Start over** (under Generated views) clears it. A view still being generated
+when the page reloads is lost; a video still being made keeps going and reappears, unless the app itself was restarted.
+
 ## Transition video
 
 Under **5. Transition video** on the Make page, click generated views in the order the camera should visit them and press

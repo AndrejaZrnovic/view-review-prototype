@@ -119,7 +119,7 @@ mk:function(){var n=M.imgs.length,g=M.gen.length;
  h+='<div class="row" style="justify-content:flex-start;gap:6px;margin-top:12px"><button data-a="mkreset" class="rst">Reset view</button><span class="st">Presets</span>'+[['Front',0,0],['Right',90,0],['Back',180,0],['Left',270,0],['Three-quarter',45,25],['Top',0,80]].map(function(p){return '<button data-a="mkpre" data-az="'+p[1]+'" data-el="'+p[2]+'">'+p[0]+'</button>'}).join('')+'<button data-a="mksnap"'+(M.snap?' class="pri"':'')+'>Snap rotation to 45°: '+(M.snap?'on':'off')+'</button></div>';
  h+='<label style="margin-top:12px">Prompt (you can edit it)<br><textarea id="mkp" rows="4" style="width:100%">'+esc(M.pe?M.prompt:autoPrompt())+'</textarea></label><div class="row"><span class="mut">Move the sliders or drag the dial. The prompt updates until you edit it yourself.</span><button class="pri'+(M.busy?' busy':'')+'" data-a="mkgen"'+(M.busy||!n?' disabled':'')+'>'+(M.busy?'<span class="spin sm"></span>Generating… <b class="elapsed">'+elapsed()+'</b>':'Generate view')+'</button></div>'+(M.err?'<div class="err">'+esc(M.err)+'</div>':'')+'</div>';
  var load=M.busy?'<div class="card genload" style="margin:0" role="status" aria-live="polite"><div class="thumb gen"><div class="shim"></div><div class="spin"></div><div class="gstep">'+(M.busyStyle?'Applying the '+esc(M.busyStyle)+' style, then turning the camera…':'Creating the new view…')+'</div></div><div class="row" style="margin-top:0"><strong>'+esc(M.busyName)+'</strong><span class="badge b-ai">Generating</span></div><div class="row"><span class="st">Elapsed <b class="elapsed">'+elapsed()+'</b></span><span class="st">Can take a few minutes</span></div><div class="ibar"><div></div></div></div>':'';
- h+='<div class="card"><h2>4. Generated views</h2>'+(g||M.busy?'<div class="grid">'+load+M.gen.map(function(x,i){return '<div class="card" style="margin:0"><button class="thumb gen zoom" data-a="mkzoom" data-i="'+i+'" title="Open large view" aria-label="Open '+esc(x.name)+' large"><img src="'+x.img+'" alt="'+esc(x.name)+'"></button><div class="row" style="margin-top:0"><strong>'+esc(x.name)+'</strong><span class="badge b-ai">'+(x.mock?'Mock':'AI-generated')+'</span></div><div class="row"><span class="st">'+x.az+'°, '+x.el+'°, '+dWord(x.dist)+(x.style?'<br>Style: '+esc(x.style):'')+(x.unseen?'<br><span class="warn" title="No uploaded photo shows this side, so its details are AI-invented'+(x.cleaned?'. Invented text and logos were removed automatically.':'.')+'">Side not in your photos</span>':'')+'</span><button data-a="mkrmg" data-i="'+i+'">Remove</button></div></div>'}).join('')+'</div>':'<p class="mut">Nothing yet. Place the camera and press Generate view.</p>')+'<div class="row" style="margin-top:12px"><button data-a="home">Back</button><button class="pri" data-a="mkreview"'+(g?'':' disabled')+'>Review '+g+' view'+(g===1?'':'s')+'</button></div></div>';
+ h+='<div class="card"><h2>4. Generated views</h2>'+(g||M.busy?'<div class="grid">'+load+M.gen.map(function(x,i){return '<div class="card" style="margin:0"><button class="thumb gen zoom" data-a="mkzoom" data-i="'+i+'" title="Open large view" aria-label="Open '+esc(x.name)+' large"><img src="'+x.img+'" alt="'+esc(x.name)+'"></button><div class="row" style="margin-top:0"><strong>'+esc(x.name)+'</strong><span class="badge b-ai">'+(x.mock?'Mock':'AI-generated')+'</span></div><div class="row"><span class="st">'+x.az+'°, '+x.el+'°, '+dWord(x.dist)+(x.style?'<br>Style: '+esc(x.style):'')+(x.unseen?'<br><span class="warn" title="No uploaded photo shows this side, so its details are AI-invented'+(x.cleaned?'. Invented text and logos were removed automatically.':'.')+'">Side not in your photos</span>':'')+'</span><button data-a="mkrmg" data-i="'+i+'">Remove</button></div></div>'}).join('')+'</div>':'<p class="mut">Nothing yet. Place the camera and press Generate view.</p>')+'<div class="row" style="margin-top:12px"><span><button data-a="home">Back</button> '+(M.imgs.length||M.gen.length?'<button data-a="mkwipe" title="Remove all photos, views, the moodboard choice and the video">'+(M.wipe?'Click again to delete everything':'Start over')+'</button>':'')+'</span><button class="pri" data-a="mkreview"'+(g?'':' disabled')+'>Review '+g+' view'+(g===1?'':'s')+'</button></div></div>';
  h+=vidCard();
  return h},
 consent:function(){return '<h1>Study information and consent</h1><div class="card"><p>You will review product images that an AI tool created for a video project, then answer a few short questions. This takes about 15 minutes.</p><p>The interface is a prototype. The images are pre-made and not generated live. We record your clicks and answers, not your identity. You may stop at any time.</p><label><input type="checkbox" id="cons"> I have read this and agree to take part.</label></div><button class="pri" data-a="consent">Continue</button><div id="msg" class="err"></div>'},
@@ -252,6 +252,31 @@ function vMake(){var seq=vSeq();if(seq.length<2||!BACKEND)return;V.err='';V.t0=D
  .then(function(r){return r.json()}).then(function(j){if(j.error)throw new Error(j.error);V.job=j;render();vPoll()}).catch(function(e){V.job=null;V.err=e.message||'Could not start the video.';render()})}
 function vPoll(){if(!V.job||V.job.state!=='running')return;setTimeout(function(){fetch(BACKEND+'/video/'+V.job.id).then(function(r){return r.json()}).then(function(j){var was=V.job.done+'/'+V.job.started+V.job.phase;V.job=j;if(j.state==='failed'){V.err='Video failed: '+j.error;render()}else if(j.state==='done'||was!==j.done+'/'+j.started+j.phase)render();vPoll()}).catch(function(){vPoll()})},4000)}
 setInterval(function(){if(!V.job||V.job.state!=='running')return;Array.prototype.forEach.call(document.querySelectorAll('.velapsed'),function(e){e.textContent=vElapsed()})},1000);
+/* Keep the Make page across reloads: photos, generated views, moodboard, camera and the transition video live in this
+   browser's IndexedDB (localStorage is too small for images). Each part is rewritten only when it changes. */
+var KEEP={db:null,ready:false,sig:{},t:0};
+function kvOpen(){return new Promise(function(res,rej){if(KEEP.db)return res(KEEP.db);var r=indexedDB.open('view-review-make',1);r.onupgradeneeded=function(){r.result.createObjectStore('kv')};r.onsuccess=function(){KEEP.db=r.result;res(KEEP.db)};r.onerror=function(){rej(r.error)}})}
+function kvDo(mode,fn){return kvOpen().then(function(db){return new Promise(function(res,rej){var t=db.transaction('kv',mode),q=fn(t.objectStore('kv'));t.oncomplete=function(){res(q&&q.result)};t.onerror=function(){rej(t.error)}})})}
+function keepParts(){var sq=vSeq().map(function(x){return M.gen.indexOf(x)});
+ return {imgs:M.imgs,gen:M.gen,mood:{sel:M.mood.sel,applied:M.mood.applied,f:M.mood.f,custom:M.mood.custom},
+  meta:{v:1,onMake:S.step==='mk',sheet:M.sheet,az:M.az,el:M.el,dist:M.dist,roll:M.roll,lens:M.lens,snap:M.snap,pe:M.pe,prompt:M.prompt,
+   video:{seq:sq,quality:V.quality,dur:V.dur,aspect:V.aspect,loop:V.loop,job:V.job&&V.job.id?V.job:null}}}}
+function keepSig(k,v){if(k==='meta')return JSON.stringify(v);if(k==='mood')return JSON.stringify([v.sel,v.applied,v.f,v.custom.map(function(c){return c.id+c.img.length})]);
+ return v.map(function(x){return [x.side,x.name,(x.data||x.img||'').length,x.az,x.el,x.dist,x.style,x.unseen,x.cleaned].join('|')}).join('/')}
+function keepNow(){if(!KEEP.ready)return;var P=keepParts();try{kvDo('readwrite',function(st){for(var k in P){var g=keepSig(k,P[k]);if(KEEP.sig[k]!==g){KEEP.sig[k]=g;st.put(P[k],k)}}}).catch(function(){})}catch(x){}}
+function keepSoon(){clearTimeout(KEEP.t);KEEP.t=setTimeout(keepNow,300)}
+function keepLoad(){var out={};return kvDo('readonly',function(st){['imgs','gen','mood','meta'].forEach(function(k){var q=st.get(k);q.onsuccess=function(){out[k]=q.result}})}).then(function(){
+ if(out.imgs)M.imgs=out.imgs;if(out.gen)M.gen=out.gen;
+ if(out.mood){M.mood.sel=out.mood.sel||[];M.mood.applied=!!out.mood.applied;M.mood.f=out.mood.f||'All';M.mood.custom=out.mood.custom||[]}
+ var m=out.meta;if(m){['sheet','az','el','dist','roll','lens','snap','pe','prompt'].forEach(function(k){if(m[k]!==undefined)M[k]=m[k]});
+  var vv=m.video||{};V.seq=(vv.seq||[]).map(function(i){return M.gen[i]}).filter(Boolean);['quality','dur','aspect','loop'].forEach(function(k){if(vv[k]!==undefined)V[k]=vv[k]});
+  if(vv.job){V.job=vv.job;if(V.job.state==='running')V.t0=V.job.t0||Date.now();
+   fetch('/api/video/'+V.job.id).then(function(r){return r.ok?r.json():null}).then(function(j){
+    if(j){V.job=j;if(j.state==='failed')V.err='Video failed: '+j.error;render();vPoll()}
+    else if(V.job.state==='running'){V.job=null;V.err='The video was interrupted because the app was restarted. Make it again.';render()}
+    else if(V.job.file)fetch(V.job.file,{headers:{Range:'bytes=0-0'}}).then(function(r){if(!r.ok){V.job=null;render()}})}).catch(function(){})}
+  if(m.onMake&&S.step==='home')S.step='mk'}
+ KEEP.ready=true;for(var k in out)if(out[k]!==undefined)KEEP.sig[k]=keepSig(k,out[k]);render()})}
 var LB=-1;
 function lbShow(){var el=document.getElementById('lb');if(LB<0||!M.gen[LB]){if(el)el.remove();LB=-1;return}var x=M.gen[LB],n=M.gen.length;
  if(!el){el=document.createElement('div');el.id='lb';el.className='lb';el.setAttribute('role','dialog');el.setAttribute('aria-modal','true');document.body.appendChild(el);el.addEventListener('click',function(e){if(e.target===el)lbClose()})}
@@ -346,6 +371,7 @@ document.addEventListener('click',function(e){var b=e.target.closest('button');i
  else if(a==='home'){S.step='home'}
  else if(a==='mkrm'){M.imgs=M.imgs.filter(function(x){return x.side!==b.dataset.side})}
  else if(a==='mkrmg'){M.gen.splice(+b.dataset.i,1)}
+ else if(a==='mkwipe'){if(!M.wipe){M.wipe=true;render();setTimeout(function(){M.wipe=false;render()},4000);return}M.wipe=false;M.imgs=[];M.gen=[];M.sheet='';M.pe=false;M.prompt='';M.mood.sel=[];M.mood.applied=false;M.mood.custom=[];V.seq=[];V.job=null;V.err='';for(var dk in DEF)M[dk]=DEF[dk]}
  else if(a==='mkel'){M.el=+b.dataset.v}
  else if(a==='mkdist'){M.dist=+b.dataset.v}
  else if(a==='mkgen'){mkGen();return}
@@ -359,7 +385,10 @@ document.addEventListener('click',function(e){var b=e.target.closest('button');i
  else if(a==='unlock'){var cd=document.getElementById('code');if(!cd||cd.value!==CODE){var mm=document.getElementById('msg');if(mm)mm.textContent='Wrong code.';return}S.auth=true;S.step=S.step==='debrief'?'results':'setup'}
  else if(a==='restart'){S.step='setup'}
  render()});
+var renderPage=render;render=function(){renderPage();keepSoon()};
+document.addEventListener('input',keepSoon);
 render();
+keepLoad().catch(function(){KEEP.ready=true});
 </script>
 </body>
 </html>
