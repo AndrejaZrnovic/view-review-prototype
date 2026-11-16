@@ -69,7 +69,7 @@
       return '<p><strong>' + (s.phase === 'models' ? 'Step 2 of 2: downloading the ' + e(lab) + ' model' : 'Step 1 of 2: installing the AI engine') + '</strong></p>'
         + '<div class="bar2"><div style="width:' + pct + '%"></div></div>'
         + '<div class="st">' + (s.phase === 'models' ? s.doneGb.toFixed(1) + ' of ' + s.totalGb.toFixed(0) + ' GB · ' + pct + '%' : 'Preparing…') + (s.log.length ? ' · ' + e(s.log[s.log.length - 1]).slice(0, 90) : '') + '</div>'
-        + '<p class="mut" style="margin-top:6px">This runs once and can take 20–60 minutes depending on your internet. Keep the Start window open. You can keep using the page.</p>';
+        + '<p class="mut" style="margin-top:6px">This runs once. Keep the Start window open; you can keep using the page. Hugging Face throttles anonymous downloads: add <code>HF_TOKEN=…</code> to <code>server/.env</code> (a free <a href="https://huggingface.co/settings/tokens" target="_blank" rel="noopener">read token</a>) to make it much faster. Finished files are kept, so starting again continues where it stopped.</p>';
     }
     if (!L.installed) return '<p>Runs on this Mac. Free, no account, unlimited views. Photos never leave this computer. Choose a model size:</p>'
       + tierList(L)

@@ -44,6 +44,10 @@ Model sizes offered in the panel (download includes ~1 GB for ComfyUI and Python
 | Balanced | Q5_K_M / Q6_K | ~25 GB | 24–39 GB |
 | Small | Q3_K_M / Q4_K_M | ~18 GB | under 24 GB (e.g. M5 16 GB) |
 
+Downloads use a free Hugging Face read token when `HF_TOKEN` is set in `server/.env` (or after `hf auth login`), which
+lifts the anonymous throttle and removes the "sending unauthenticated requests to the HF Hub" warning. The two large
+files are fetched in parallel and finished files are reused, so an interrupted setup continues where it stopped.
+
 The choice is saved as `LOCAL_MODEL` (best / balanced / small) in `server/.env`. Output size follows memory:
 1.0 MP (~1024 px) at 40 GB+, 0.8 MP at 24 GB+, else 0.6 MP. Override with `LOCAL_UNET`, `LOCAL_CLIP` or
 `LOCAL_MEGAPIXELS`. `bash server/setup-local.sh`
@@ -66,11 +70,13 @@ So all views of a set share one scene. Styled photos are also saved in `server/.
 scene survives a restart.
 
 **Invented text guard (fal.ai key needed):** after every style and angle step, the result is read with fal.ai's free
-Florence-2 OCR. If it shows words that aren't in the uploaded photos (the model likes to invent brand names on sides it
-never saw), one cleanup edit paints them out, keeping the handle, lid and other physical parts. Symbols without
-letters are not caught. Views of a side that no uploaded photo shows are labelled "Side not in your photos" on the page
-and in the review step. `CLEAN_UNSEEN=0` in `server/.env` turns the guard off. Cost: one extra generation per style (local), or ~$0.03 per megapixel
-on fal.ai (`fal-ai/qwen-image-edit-2511`). The free Hugging Face Space ignores styles.
+Florence-2 OCR. The guard only exists for the model inventing a brand name on a side nobody photographed, so it is
+deliberately narrow: it never touches an image whose uploaded photo already carries wording of its own (a nutrition
+panel, a wordmark, a keyboard legend), and on a photographed side it only fires when more than 80% of the words are
+new. One cleanup edit then removes just those added graphics, using the reference photo as its second picture. Products
+whose printed label *is* the design therefore keep it. `CLEAN_UNSEEN=0` in `server/.env` turns the guard off. Cost: one
+extra generation per style (local), or ~$0.03 per megapixel on fal.ai (`fal-ai/qwen-image-edit-2511`). The free Hugging
+Face Space ignores styles.
 
 ## Your work is kept
 
@@ -99,15 +105,48 @@ off a portrait product shot, so each chosen view is first extended to the video'
 Needs the Cloud (fal.ai) generator. Views made with the same moodboard style share one scene, so pick views of one style;
 the page warns when the chosen views have different styles. The video model invents the frames between the views, so the
 product can drift mid-move: review the video like any AI-made view.
+**Complex products:** Veo has no model of the object, so every frame between two keyframes is imagined. Short moves
+survive; keys, levers, handles and other fine mechanisms can still warp. Pick more views so each step is a small turn
+(keep it under ~90°; the page shows the largest step and asks again before spending money above that), or use Best
+quality. **Add middle view** does the first half for you: for any step over 90° it asks the angle model for the pose half
+way and re-sequences the clips, so the video only interpolates what it was actually shown.
+
+The guard compares the result with the reference photo the generation actually started from, and it stands down whenever
+that photo already carries printing of its own - including keyboards, dials and rulers, whose lettering OCR returns as
+single characters. On a product with no printing of its own it can only see invented wording, and it removes it.
+
+## Model settings that matter
+
+The pipeline is Qwen-Image-Edit-2511 with fal's Multiple-Angles LoRA. That LoRA was trained on **96 camera poses** -
+8 azimuths (45° steps), 4 elevations (-30 / 0 / 30 / 60°) and 3 distances (close-up ×0.6 / medium ×1.0 / wide ×1.8) -
+driven by the prompt `<sks> [azimuth] [elevation] [distance]`, in that order. The settings below exist because of that:
+
+| Setting | Value used | Why it matters |
+| --- | --- | --- |
+| Pose snapping | on (`SNAP_POSES=0` off) | A request between the 96 poses is off-distribution: the model re-imagines the product instead of rotating it, which is where invented labels and drifting geometry come from. `292°, 56°` becomes `270°, 60°`. |
+| References per view | 1, plus up to 2 other sides when the side was never photographed | 2511 accepts several images at once; the extra sides stop it inventing a label for a face it has no source for. |
+| Same-view shortcut | on | Asking for the pose an uploaded photo already shows returns that photo instead of paying to re-imagine it. |
+| Candidate samples | 1 (`FAL_CANDIDATES=2..4`) | The endpoint returns up to 4 samples in one call. Worth paying for once there is a picker: the server keeps the sample that retained the most of the reference photo's wording, which fixes the occasional fully blank label. Multiplies the per-view price. |
+| `guidance_scale` (fal) | 4.5 | Endpoint default. At CFG 1 (the local turbo path) a negative prompt has no effect at all. |
+| `num_inference_steps` (fal) | 28 | Endpoint default and the trained sampling regime. |
+| `lora_scale` (fal) | 1 (`LORA_SCALE`) | Card recommends 0.8-1.0. Lower holds the product closer to the photo, higher follows the camera more literally. |
+| `image_size` (fal) | `square_hd` = 1 MP | 1 MP is the training size and the price unit ($0.035). Without it fal keeps the input's own dimensions, so a 12 MP phone photo is billed about 12x and rendered far above what the LoRA learned. |
+| Local steps / CFG | 4 / 1 (turbo) or 20+ / 4 (`LOCAL_STEPS`) | Turbo is the 4-step Lightning distillation: fast, softer. Above 8 steps the Lightning LoRA is skipped and the full model runs at CFG 4, which is what sharpens fine print. |
+| Local megapixels | 1.0 with 40 GB+, 0.8 at 24 GB+, 0.6 below | 1 MP is the training size; 0.6 softens small text such as a nutrition panel. |
+| Local angles LoRA | 0.9 (`LOCAL_LORA`) | Card says 0.8-1.0, start at 0.9. |
+
+`GET /api/health` reports the settings in effect. These are not prompt tricks: prompting decides *what* is drawn,
+these decide whether the model rotates the real product or reinvents it.
 
 ## How the UI controls are mapped
 
 - **Reference photo:** the uploaded side (front/right/back/left) nearest the requested rotation; the
   rotation is sent relative to that photo.
-- **Rotation** → azimuth (0 front, 90 right, 180 back, 270 left). **Height** → elevation, clamped to −30…90° (fal) or −30…60° (HF).
+- **Rotation** → azimuth (0 front, 90 right, 180 back, 270 left), sent as the target camera pose around the product, which is the space the LoRA's prompts and angles are trained in. **Height** → elevation, clamped to −30…90° (fal) or −30…60° (HF).
+- A pose one of the uploaded photos already shows is returned as that photo: no paid call for a view you already have.
 - **Distance** 0–100 → fal `zoom` 10–0, or HF distance 0.6–1.8.
 - **Lens** and **Tilt** → extra prompt text on fal; the HF Space and local generator ignore them.
-- Local and HF snap to the LoRA's vocabulary: 8 rotations (45° steps), 4 heights (−30, 0, 30, 60°), 3 distances.
+- Every provider snaps to the LoRA's vocabulary by default: 8 rotations (45° steps), 4 heights (-30, 0, 30, 60°), 3 distances. The page's "Snap camera to the 96 trained poses" switch controls it, and `SNAP_POSES=0` disables it server-side.
 - The editable prompt box is not sent to the model: this LoRA is driven by camera parameters, not free text.
 
 `POST /api/generate` takes the page's JSON (`images`, `azimuth`, `elevation`, `distance`, `roll`, `lens_mm`, `prompt`)

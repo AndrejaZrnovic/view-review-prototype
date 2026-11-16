@@ -71,7 +71,16 @@ const LOCAL = {
   lightning: 'Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors',
   angles: 'qwen-image-edit-2511-multiple-angles-lora.safetensors',
   // Output size in megapixels (1.0 is ~1024x1024), set by memory: smaller machines stay fast and in memory.
+  // 1.0 is both the training size and the ComfyUI template default; below that, fine print (a nutrition panel)
+  // turns to mush, so a machine with enough memory should run 1.0.
   megapixels: +(process.env.LOCAL_MEGAPIXELS || (RAM_GB >= 40 ? 1.0 : RAM_GB >= 24 ? 0.8 : 0.6)),
+  // The model ships two regimes. Turbo = 4 steps at CFG 1 with the 4-step Lightning LoRA (what fal runs). The full
+  // model is ~20-40 steps at CFG 4, slower but sharper; CFG 1 also means the negative prompt does nothing, so a
+  // negative prompt only has an effect above 8 steps. LOCAL_STEPS=20 switches paths.
+  steps: +(process.env.LOCAL_STEPS || 4),
+  get cfg() { return +(process.env.LOCAL_CFG || (this.steps > 8 ? 4 : 1)); },
+  get turbo() { return this.steps <= 8; },
+  anglesStrength: +(process.env.LOCAL_LORA || 0.9), // LoRA card: 0.8-1.0, "start with 0.9"
 };
 const localInstalled = () => engineInstalled() && have(['unet', LOCAL.unet]) && have(['text_encoders', LOCAL.clip]) && SHARED.every(have);
 
@@ -115,8 +124,23 @@ function pickReference(images, az) {
   return best;
 }
 
+/* ---------- the model's own grid ---------- */
+// The Multiple-Angles LoRA was trained on exactly 96 camera poses: 8 azimuths (45° steps), 4 elevations
+// (-30 / 0 / 30 / 60) and 3 distances (close-up / medium / wide). A request between those poses is off-distribution,
+// and the model then re-imagines the product instead of rotating it, which is where invented labels and drifting
+// geometry come from. Snapping is on by default: the page's rotation switch follows it, SNAP_POSES=0 turns it off.
+const SNAP_POSES = env('SNAP_POSES') !== '0';
+const snapAz = a => (((Math.round(a / 45) * 45) % 360) + 360) % 360;
+const snapEl = e => [-30, 0, 30, 60].reduce((a, b) => (Math.abs(b - e) < Math.abs(a - e) ? b : a));
+const snapDist = d => (d < 40 ? 0.6 : d < 80 ? 1.0 : 1.8); // the LoRA's three distance factors
+const snapZoom = d => (d < 40 ? 10 : d < 80 ? 5 : 0); // fal zoom: 10 close-up, 5 medium, 0 wide
+// The endpoint returns up to 4 samples per call. More than one is only worth paying for with a way to choose, so
+// bestCandidate() ranks them by how much of the reference's own wording survived. Off by default (cost multiplies).
+const CANDIDATES = Math.min(4, Math.max(1, +(env('FAL_CANDIDATES') || 1)));
+
 function styleHints(p) {
-  const h = ['Keep the product\'s shape, colours, logo, text and proportions identical. Do not add any logo, brand name, text or label that is not on the product in the photo'];
+  const h = ['Keep the product\'s shape, colours, proportions and all of its own printed artwork identical to the reference photo',
+    'reproduce every existing logo, wordmark, label, number and barcode exactly as it appears; do not invent new branding or extra words'];
   if (p.lens_mm <= 30) h.push('wide-angle lens');
   else if (p.lens_mm >= 70) h.push('telephoto lens');
   if (Math.abs(p.roll) > 3) h.push(`camera tilted ${Math.round(p.roll)} degrees`);
@@ -124,16 +148,29 @@ function styleHints(p) {
 }
 
 /* ---------- providers ---------- */
-async function viaFal(p, ref, rel) {
+async function viaFal(p, ref, rel, extras = []) {
+  const snap = p.snap !== false && SNAP_POSES;
+  // horizontal_angle is the target camera pose around the product (0 front, 90 right), the same space the LoRA's
+  // <sks> prompt is built in - not the rotation away from whichever photo happened to be the nearest reference.
+  const target = snap ? snapAz(p.azimuth) : (Math.round(p.azimuth) + 360) % 360;
   const body = {
-    image_urls: [ref.image],
-    horizontal_angle: (Math.round(rel) + 360) % 360,
-    vertical_angle: clamp(Math.round(p.elevation), -30, 90),
-    zoom: +clamp(10 - p.distance / 10, 0, 10).toFixed(1), // UI: 0 = close, 100 = far; fal: 0 = wide, 10 = close-up
+    // Qwen-Image-Edit-2511 accepts several reference images at once, so a view of a side nobody photographed can be
+    // given the other sides as extra context instead of inventing a label from nothing.
+    image_urls: [ref.image, ...extras.map(x => x.image)].slice(0, 3),
+    horizontal_angle: target,
+    vertical_angle: snap ? snapEl(p.elevation) : clamp(Math.round(p.elevation), -30, 90),
+    zoom: snap ? snapZoom(p.distance) : +clamp(10 - p.distance / 10, 0, 10).toFixed(1), // UI: 0 = close, 100 = far; fal: 0 = wide, 10 = close-up
     additional_prompt: styleHints(p),
-    negative_prompt: NO_TEXT_NEG, // sides the camera never saw tend to get invented branding
+    negative_prompt: EXTRA_NEG, // not the product's own label: this model draws printed artwork from the photo
+    // Documented defaults of this endpoint. guidance 4.5 gives the prompt (and the negative prompt) real weight;
+    // square_hd pins the output to 1 MP, which is the training size and the $0.035 price unit, so a 12 MP phone
+    // photo no longer costs 12x or gets rendered far above what the LoRA learned.
+    image_size: env('FAL_IMAGE_SIZE') || 'square_hd',
+    num_inference_steps: +(env('FAL_STEPS') || 28),
+    guidance_scale: +(env('FAL_GUIDANCE') || 4.5),
+    lora_scale: +(env('LORA_SCALE') || 1),
     output_format: 'png',
-    num_images: 1,
+    num_images: CANDIDATES,
   };
   const r = await fetch(`https://fal.run/${FAL_MODEL}`, {
     method: 'POST',
@@ -142,7 +179,8 @@ async function viaFal(p, ref, rel) {
   });
   const j = await r.json().catch(() => ({}));
   if (!r.ok || !j.images?.[0]?.url) throw new Error(`fal.ai ${r.status}: ${JSON.stringify(j).slice(0, 400)}`);
-  return { url: j.images[0].url, prompt: j.prompt, seed: j.seed };
+  const urls = j.images.map(x => x.url);
+  return { url: urls[0], urls, prompt: j.prompt, seed: j.seed };
 }
 
 let hfClient = null;
@@ -153,10 +191,11 @@ async function hf() {
 
 async function viaHf(p, ref, rel) {
   const client = await hf();
-  // Same LoRA as fal: 0 front, 90 right side; the Space snaps to 45 degree steps, elevation -30..60, distance 0.6..1.8.
+  // Same LoRA as fal: azimuth is the target camera pose (0 front, 90 right side); the Space snaps to 45 degree
+  // steps, elevation -30..60, distance 0.6..1.8.
   const res = await client.predict('/infer_camera_edit', {
     image: dataUrlToBlob(ref.image),
-    azimuth: (Math.round(rel) + 360) % 360,
+    azimuth: (Math.round(p.azimuth) + 360) % 360,
     elevation: clamp(Math.round(p.elevation), -30, 60),
     distance: +(0.6 + clamp(p.distance, 0, 100) / 100 * 1.2).toFixed(2), // UI: 0 = close, 100 = far
     seed: 0,
@@ -171,10 +210,10 @@ async function viaHf(p, ref, rel) {
 
 // The angles LoRA understands 8 azimuths, 4 elevations and 3 distances; snap to the nearest.
 const AZ_WORDS = ['front view', 'front-right quarter view', 'right side view', 'back-right quarter view', 'back view', 'back-left quarter view', 'left side view', 'front-left quarter view'];
-function lockedPrompt(rel, p) {
-  const az = AZ_WORDS[Math.round(((rel % 360) + 360) % 360 / 45) % 8];
+function lockedPrompt(azimuth, p) {
+  const az = AZ_WORDS[Math.round(((azimuth % 360) + 360) % 360 / 45) % 8]; // the target pose, not a turn
   const el = p.elevation < -15 ? 'low-angle shot' : p.elevation < 15 ? 'eye-level shot' : p.elevation < 45 ? 'elevated shot' : 'high-angle shot';
-  const d = p.distance < 30 ? 'close-up' : p.distance < 70 ? 'medium shot' : 'wide shot';
+  const d = { 0.6: 'close-up', 1: 'medium shot', 1.8: 'wide shot' }[snapDist(p.distance)]; // the LoRA's three factors
   return `<sks> ${az} ${el} ${d}`;
 }
 
@@ -203,12 +242,12 @@ for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(sig, () => { comfy
 
 // Same graph as fal's published comfyui-workflow-multiple-angles.json, with GGUF loaders.
 // angles=false gives the plain edit model (used for the style step); image2 is an optional second reference.
-function comfyWorkflow(imageName, prompt, seed, { angles = true, image2 = null } = {}) {
+function comfyWorkflow(imageName, prompt, seed, { angles = true, image2 = null, image3 = null } = {}) {
   const w = {
     unet: { class_type: 'UnetLoaderGGUF', inputs: { unet_name: LOCAL.unet } },
-    angles: { class_type: 'LoraLoaderModelOnly', inputs: { model: ['unet', 0], lora_name: LOCAL.angles, strength_model: 0.9 } },
-    lightning: { class_type: 'LoraLoaderModelOnly', inputs: { model: angles ? ['angles', 0] : ['unet', 0], lora_name: LOCAL.lightning, strength_model: 1 } },
-    shift: { class_type: 'ModelSamplingAuraFlow', inputs: { model: ['lightning', 0], shift: 3.1 } },
+    angles: { class_type: 'LoraLoaderModelOnly', inputs: { model: ['unet', 0], lora_name: LOCAL.angles, strength_model: LOCAL.anglesStrength } },
+    ...(LOCAL.turbo ? { lightning: { class_type: 'LoraLoaderModelOnly', inputs: { model: angles ? ['angles', 0] : ['unet', 0], lora_name: LOCAL.lightning, strength_model: 1 } } } : {}),
+    shift: { class_type: 'ModelSamplingAuraFlow', inputs: { model: LOCAL.turbo ? ['lightning', 0] : angles ? ['angles', 0] : ['unet', 0], shift: 3.1 } },
     cfgnorm: { class_type: 'CFGNorm', inputs: { model: ['shift', 0], strength: 1 } },
     clip: { class_type: 'CLIPLoaderGGUF', inputs: { clip_name: LOCAL.clip, type: 'qwen_image' } },
     vae: { class_type: 'VAELoader', inputs: { vae_name: LOCAL.vae } },
@@ -219,15 +258,21 @@ function comfyWorkflow(imageName, prompt, seed, { angles = true, image2 = null }
     posref: { class_type: 'FluxKontextMultiReferenceLatentMethod', inputs: { conditioning: ['pos', 0], reference_latents_method: 'index_timestep_zero' } },
     negref: { class_type: 'FluxKontextMultiReferenceLatentMethod', inputs: { conditioning: ['neg', 0], reference_latents_method: 'index_timestep_zero' } },
     latent: { class_type: 'VAEEncode', inputs: { pixels: ['scale', 0], vae: ['vae', 0] } },
-    sample: { class_type: 'KSampler', inputs: { model: ['cfgnorm', 0], positive: ['posref', 0], negative: ['negref', 0], latent_image: ['latent', 0], seed, steps: 4, cfg: 1, sampler_name: 'euler', scheduler: 'simple', denoise: 1 } },
+    sample: { class_type: 'KSampler', inputs: { model: ['cfgnorm', 0], positive: ['posref', 0], negative: ['negref', 0], latent_image: ['latent', 0], seed, steps: LOCAL.steps, cfg: LOCAL.cfg, sampler_name: 'euler', scheduler: 'simple', denoise: 1 } },
     decode: { class_type: 'VAEDecode', inputs: { samples: ['sample', 0], vae: ['vae', 0] } },
     save: { class_type: 'SaveImage', inputs: { images: ['decode', 0], filename_prefix: angles ? 'view-review/angle' : 'view-review/style' } },
   };
   if (!angles) delete w.angles;
+  // image2 / image3 are the extra references TextEncodeQwenImageEditPlus accepts; both encoders see them.
   if (image2) {
     w.load2 = { class_type: 'LoadImage', inputs: { image: image2 } };
     w.scale2 = { class_type: 'ImageScaleToTotalPixels', inputs: { image: ['load2', 0], upscale_method: 'lanczos', megapixels: 0.4, resolution_steps: 16 } };
     w.pos.inputs.image2 = ['scale2', 0]; w.neg.inputs.image2 = ['scale2', 0];
+  }
+  if (image3) {
+    w.load3 = { class_type: 'LoadImage', inputs: { image: image3 } };
+    w.scale3 = { class_type: 'ImageScaleToTotalPixels', inputs: { image: ['load3', 0], upscale_method: 'lanczos', megapixels: 0.4, resolution_steps: 16 } };
+    w.pos.inputs.image3 = ['scale3', 0]; w.neg.inputs.image3 = ['scale3', 0];
   }
   return w;
 }
@@ -258,10 +303,11 @@ async function comfyRun(workflow) {
   throw new Error('Local generation timed out after 25 minutes');
 }
 
-async function viaLocal(p, ref, rel) {
+async function viaLocal(p, ref, rel, extras = []) {
   await ensureComfy();
-  const prompt = lockedPrompt(rel, p), seed = Math.floor(Math.random() * 2 ** 31);
-  return { url: await comfyRun(comfyWorkflow(await comfyUpload(ref.image), prompt, seed)), prompt, seed };
+  const prompt = lockedPrompt(p.azimuth, p), seed = Math.floor(Math.random() * 2 ** 31);
+  const up = await Promise.all(extras.slice(0, 2).map(x => comfyUpload(x.image)));
+  return { url: await comfyRun(comfyWorkflow(await comfyUpload(ref.image), prompt, seed, { image2: up[0] || null, image3: up[1] || null })), prompt, seed };
 }
 
 /* ---------- style step (moodboard) ---------- */
@@ -272,7 +318,7 @@ const hasStyle = st => !!st && ((st.environment || []).some(Boolean) || (st.mood
 function stylePrompt(st, sceneFromStyled) {
   const env = (st.environment || []).filter(Boolean);
   const mood = [...new Set((st.mood || []).join(',').split(',').map(x => x.trim()).filter(Boolean))];
-  const keep = ' Keep the product itself exactly the same: shape, proportions, colours, materials, and any logo or text it already has. Do not add any logo, brand name, text or label that is not visible on the product in Picture 1. Change only the background, surface and lighting. Keep the same camera angle and framing. Photorealistic product photograph, sharp focus on the product.';
+  const keep = ' Keep the product itself exactly the same: shape, proportions, colours and materials, and every logo, label, printed word, number and barcode already on it in Picture 1. Do not invent new branding, words or labels. Change only the background, surface and lighting. Keep the same camera angle and framing. Photorealistic product photograph, sharp focus on the product.';
   if (sceneFromStyled) return 'Place the exact product from Picture 1 into the same scene, surface, lighting and colour grading as Picture 2.' + keep;
   return 'Place the exact product from Picture 1 in a new professional product photo.'
     + (env.length ? ` Scene: ${env.join('; ')}.` : '') + (mood.length ? ` Mood: ${mood.join(', ')}.` : '')
@@ -287,13 +333,15 @@ async function plainEdit(P, image, prompt, scene = null) {
   }
   const r = await fetch('https://fal.run/fal-ai/qwen-image-edit-2511', {
     method: 'POST', headers: { Authorization: `Key ${env('FAL_KEY')}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ prompt, image_urls: scene ? [image, scene] : [image], negative_prompt: NO_TEXT_NEG, output_format: 'png', num_images: 1 }),
+    body: JSON.stringify({ prompt, image_urls: scene ? [image, scene] : [image], negative_prompt: EXTRA_NEG, output_format: 'png', num_images: 1 }),
   });
   const j = await r.json().catch(() => ({}));
   if (!r.ok || !j.images?.[0]?.url) throw new Error(`fal.ai ${r.status}: ${JSON.stringify(j).slice(0, 400)}`);
   return urlToDataUrl(j.images[0].url);
 }
-const NO_TEXT_NEG = 'added text, letters, words, numbers, logo, icon, brand name, label, sticker, watermark';
+// A negative prompt steers the model away from the words it lists, so listing "text, logo, label" stripped real
+// packaging artwork away (a printed soda can came back as a plain pink cylinder). Only list what is never wanted.
+const EXTRA_NEG = 'watermark, signature, caption, border, frame, duplicate product, distorted product, blurry';
 
 // Styled photos are cached in memory and on disk (server/.cache, git-ignored), so a set keeps its scene across restarts.
 const styleCache = new Map();
@@ -305,7 +353,7 @@ async function styleOne(P, image, scene, prompt) {
   const file = path.join(STYLE_DIR, key + '.png');
   if (fs.existsSync(file)) { const d = 'data:image/png;base64,' + fs.readFileSync(file).toString('base64'); styleCache.set(key, d); return d; }
   const t0 = Date.now();
-  const out = (await guardText(P, await plainEdit(P, image, prompt, scene), [image])).image;
+  const out = (await guardText(P, await plainEdit(P, image, prompt, scene), [image], { unseen: false })).image;
   console.log(`[style] ${P} in ${((Date.now() - t0) / 1000).toFixed(1)}s :: ${prompt.slice(0, 120)}…`);
   try { fs.mkdirSync(STYLE_DIR, { recursive: true }); fs.writeFileSync(file, Buffer.from(out.split(',')[1], 'base64')); } catch {}
   if (styleCache.size > 30) styleCache.delete(styleCache.keys().next().value);
@@ -324,13 +372,20 @@ function unseenSide(images, az, el) {
   if (!sides.length) return true;
   return Math.min(...sides.map(i => Math.abs(angD(SIDE_AZ[i.side], az)))) >= 60;
 }
-const CLEAN_PROMPT = 'Remove only flat printed graphics from the product surface: words, letters, numbers, logos and icons. Paint over them with the same colour, gradient and finish as the surrounding surface. Do not remove, move or change any physical part of the product: the handle, lid, spout, rim, base and all edges must stay exactly as they are. Keep the background, lighting, framing and camera angle identical.';
+const CLEAN_PROMPT = 'Picture 1 is a product view, Picture 2 is the real product. Remove only the printed words, letters, numbers, logos and icons in Picture 1 that do not appear on the product in Picture 2, and paint those areas over with the surrounding colour, gradient and finish. Keep the product\'s own design exactly as Picture 2 shows it, including its brand name, label, numbers and graphics. Do not move, reshape or remove any physical part. Keep the background, lighting, framing and camera angle identical.';
 
-// Text guard: read the text in a result (fal.ai Florence-2 OCR, free, ~2 s) and, if it shows words that are not in
-// the uploaded photos, run one cleanup edit. Without a fal.ai key there is no OCR, so nothing is cleaned.
+// Text guard: read the text in a result (fal.ai Florence-2 OCR, free, ~2 s) and only intervene when it is almost all
+// new wording. Without a fal.ai key there is no OCR, so nothing is cleaned.
 const ocrCache = new Map();
-const letters = s => String(s || '').replace(/[^A-Za-z0-9]/g, '').toLowerCase();
-async function ocr(image) {
+// Florence returns free text; compare it word by word, not as one glued token ("olipop" vs "oli pop" differ
+// character by character and made every real label look invented).
+const wordsOf = s => [...new Set(String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').split(' ').filter(w => w.length > 2))];
+// Keyboards, rulers and numbered dials come back as standalone single characters, which wordsOf drops. Counting them
+// keeps a text-rich product from looking wordless and having its real printing cleaned away.
+const singlesOf = t => (String(t || '').match(/(^|[^a-z0-9])[a-z0-9](?![a-z0-9])/gi) || []).length;
+// fal's Florence OCR answers with a bare string or an object of strings, sometimes nested: flatten every string in it.
+const textOf = v => typeof v === 'string' ? v : v && typeof v === 'object' ? Object.values(v).map(textOf).join(' ') : '';
+async function ocrText(image) {
   const key = hash(image);
   if (ocrCache.has(key)) return ocrCache.get(key);
   const r = await fetch('https://fal.run/fal-ai/florence-2-large/ocr', {
@@ -338,20 +393,51 @@ async function ocr(image) {
   });
   const j = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(`fal.ai OCR ${r.status}`);
-  const t = letters(j.results);
+  const t = textOf(j.results); // never String(j.results): an object turns into "[object Object]"
   if (ocrCache.size > 200) ocrCache.delete(ocrCache.keys().next().value);
   ocrCache.set(key, t);
   return t;
 }
-async function guardText(P, image, refs) {
-  if (!env('FAL_KEY') || env('CLEAN_UNSEEN') === '0') return { image, cleaned: false };
+const ocr = async image => wordsOf(await ocrText(image));
+// Choose between candidate samples by how much of the reference photo's wording survived: a can that lost its label
+// scores 0, a faithful one keeps most of the words. Florence OCR is free and already used by the guard below; with no
+// fal.ai key there is nothing to score with, so the first sample is used.
+async function bestCandidate(urls, refs) {
+  if (urls.length < 2 || !env('FAL_KEY') || !refs.length) return urls[0];
+  try {
+    const known = new Set((await Promise.all(refs.map(ocr))).flat());
+    let best = urls[0], bestScore = -1, bestKept = 0;
+    for (const u of urls) {
+      const found = await ocr(u).catch(() => []);
+      const kept = new Set(found.filter(w => known.has(w))).size; // distinct words: repeating a brand must not win
+      const share = known.size ? kept / known.size : 0;
+      const score = share + found.length * 0.001; // richer wording breaks ties
+      if (score > bestScore) { bestScore = score; best = u; bestKept = share; }
+    }
+    console.log(`[candidates] kept #${urls.indexOf(best) + 1} of ${urls.length}, ${Math.round(bestKept * 100)}% of the reference's words`);
+    return best;
+  } catch { return urls[0]; }
+}
+
+// The guard exists for one case: the model writes a plausible brand name onto a side nobody photographed. It must
+// never touch a product whose printed label is the point, so it stays out of the way whenever the uploaded photo
+// carries its own wording (a nutrition panel, a keyboard legend), and it only fires when most of the words are new.
+// `unseen` = this view shows a side no uploaded photo covers.
+async function guardText(P, image, refs, { unseen = false, scene = null } = {}) {
+  if (!env('FAL_KEY') || env('CLEAN_UNSEEN') === '0' || !refs.length) return { image, cleaned: false };
   try {
     const found = await ocr(image);
-    if (found.length < 2) return { image, cleaned: false };
-    const known = (await Promise.all(refs.map(ocr))).join(' ');
-    if (known.includes(found)) return { image, cleaned: false };
-    console.log(`[text guard] invented text "${found}" -> cleaning`);
-    return { image: await plainEdit(P, image, CLEAN_PROMPT), cleaned: true };
+    if (found.length < 3) return { image, cleaned: false }; // a word or two is OCR noise on a texture
+    const refText = (await Promise.all(refs.map(ocrText))).join('\n');
+    const known = new Set(wordsOf(refText));
+    if (known.size >= 4) return { image, cleaned: false }; // the product has its own printed design: keep it
+    if (singlesOf(refText) >= 6) return { image, cleaned: false }; // text-rich but OCR split it into single characters
+    const novel = found.filter(w => !known.has(w)).length / found.length;
+    if (novel < (unseen ? 0.6 : 0.8)) return { image, cleaned: false }; // mostly the same wording as the photo
+    console.log(`[text guard] ${Math.round(novel * 100)}% new wording${unseen ? ' on an unphotographed side' : ''} -> cleaning`);
+    // Compare against the view this generation actually started from, not whichever photo was uploaded first: an
+    // invented word on the back is judged against the back, not against the front.
+    return { image: await plainEdit(P, image, CLEAN_PROMPT, scene || refs[0]), cleaned: true };
   } catch (e) { console.error('[text guard]', e.message); return { image, cleaned: false }; }
 }
 
@@ -387,27 +473,33 @@ function readBody(req, limit = 60 * 1024 * 1024) {
 async function generate(p) {
   if (!Array.isArray(p.images) || !p.images.length) throw new Error('No reference images');
   const az = ((+p.azimuth || 0) % 360 + 360) % 360;
-  const q = { azimuth: az, elevation: +p.elevation || 0, distance: +(p.distance ?? 50), roll: +p.roll || 0, lens_mm: +p.lens_mm || 50 };
+  const q = { azimuth: az, elevation: +p.elevation || 0, distance: +(p.distance ?? 50), roll: +p.roll || 0, lens_mm: +p.lens_mm || 50,
+    snap: p.snap === undefined ? true : !!p.snap }; // the page's rotation switch; on by default, to the LoRA's own grid
   let { ref, rel } = pickReference(p.images, az);
   const t0 = Date.now();
   const P = provider(), run = { fal: viaFal, hf: viaHf, local: viaLocal }[P];
   if (!run || !usable(P)) throw new Error('No AI generator is ready: set one up in the panel at the top of the page');
   const styled = hasStyle(p.style) && P !== 'hf'; // the free HF Space only runs the angle model
   const unseen = unseenSide(p.images, az, q.elevation);
-  let r, cleaned = false;
+  // Extra reference photos only where the model would otherwise have to invent the side, and only when the scene is
+  // not restyled (mixing a styled and an unstyled reference would pull the background apart).
+  const extras = unseen && !styled ? p.images.filter(i => i.side !== ref.side).slice(0, 2) : [];
+  let r, cleaned = false, sameView = false;
   try {
     if (styled) ref = await styledReference(P, p.images, ref, p.style);
-    // Styled and already at the requested angle: the styled photo is the answer.
-    const sameView = Math.abs(rel) < 23 && Math.abs(q.elevation) < 15 && q.distance >= 30 && q.distance < 70;
-    r = styled && sameView ? { url: ref.image, prompt: '(style only)' } : await run(q, ref, rel);
+    // Already at the requested pose and level: the photo is the answer. Free, and it is the exact view rather than a
+    // re-imagining of it (styled photos are restyled above, so this works for both).
+    sameView = Math.abs(rel) < 23 && Math.abs(q.elevation) < 15 && q.distance >= 30 && q.distance < 70;
+    r = sameView ? { url: ref.image, prompt: '(same view)' } : await run(q, ref, rel, extras);
+    if (r.urls && r.urls.length > 1) r = { ...r, url: await bestCandidate(r.urls, p.images.map(i => i.image)) };
     if (P !== 'hf') { // the free HF Space has no plain edit model
-      const g = await guardText(P, r.url.startsWith('data:') ? r.url : await urlToDataUrl(r.url), p.images.map(i => i.image));
+      const g = await guardText(P, r.url.startsWith('data:') ? r.url : await urlToDataUrl(r.url), p.images.map(i => i.image), { unseen, scene: ref.image });
       r = { ...r, url: g.image }; cleaned = g.cleaned;
     }
     lastError = ''; lastSecs = Math.round((Date.now() - t0) / 1000);
   } catch (e) { lastError = friendly(e.message); throw e; }
   const image = r.url.startsWith('data:') ? r.url : await urlToDataUrl(r.url);
-  console.log(`[generate] ${P}${styled ? ' +style' : ''}${cleaned ? ' +clean' : ''} az=${az} el=${q.elevation} from ${ref.side} (turn ${Math.round(rel)}) in ${((Date.now() - t0) / 1000).toFixed(1)}s :: ${r.prompt || ''}`);
+  console.log(`[generate] ${P}${styled ? ' +style' : ''}${cleaned ? ' +clean' : ''}${sameView ? ' +sameview' : ''} az=${q.snap ? snapAz(az) : az} el=${q.snap ? snapEl(q.elevation) : q.elevation} ${q.snap ? 'snapped ' : ''}refs=${1 + extras.length} from ${ref.side} (turn ${Math.round(rel)}) in ${((Date.now() - t0) / 1000).toFixed(1)}s :: ${r.prompt || ''}`);
   return { image, provider: P, styled, unseen, cleaned, reference: ref.side, relative_turn: Math.round(rel), prompt: r.prompt, seed: r.seed };
 }
 
@@ -418,8 +510,8 @@ const VIDEO_MODELS = { fast: 'fal-ai/veo3.1/fast/first-last-frame-to-video', bes
 const VIDEO_RATE = { fast: 0.10, best: 0.20 }; // USD per second at 720p/1080p without audio
 const VIDEO_DIR = path.join(HERE, '.cache', 'videos');
 const VIDEOS = new Map(); // id -> job
-const VIDEO_NEG = 'cuts, scene change, morphing product, warping, melting, changing shape, changing colour, extra objects, people, hands, '
-  + 'new text, new logos, labels changing, watermark, flicker, shaky camera, fast motion';
+const VIDEO_NEG = 'cuts, scene change, morphing product, warping, melting, deforming, wobbling, stretching, bending, rearranging parts, '
+  + 'changing shape, changing colour, extra objects, people, hands, new text, new logos, labels changing, watermark, flicker, shaky camera, fast motion';
 
 async function falQueue(model, input, onStatus) {
   const H = { Authorization: `Key ${env('FAL_KEY')}`, 'Content-Type': 'application/json' };
@@ -499,6 +591,10 @@ function startVideo(p) {
     job.phase = 'clips';
     const pairs = views.slice(1).map((b, i) => [views[i], b]);
     if (clips > views.length - 1) pairs.push([views[views.length - 1], views[0]]);
+    // Veo has no geometry of its own: everything between two keyframes is invented. Wide moves on a complex shape
+    // (typewriter keys, a mechanism) therefore warp. Report the largest step so the page and the log can warn.
+    job.maxTurn = Math.round(Math.max(0, ...pairs.map(([a, b]) => Math.abs(((b.az - a.az) % 360 + 540) % 360 - 180))));
+    if (job.maxTurn > 90) console.log(`[video] largest move is ${job.maxTurn}°: the model must invent the geometry in between, which warps complex products`);
     const urls = await Promise.all(pairs.map(([a, b]) => {
       let seen = false;
       return falQueue(VIDEO_MODELS[quality], {
@@ -614,7 +710,11 @@ const server = http.createServer(async (req, res) => {
   try {
     if (url.pathname === '/api/health') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify({ ok: true, provider: provider(), ready: usable(), model: { fal: FAL_MODEL, hf: HF_SPACE, local: `ComfyUI ${LOCAL.unet}` }[provider()] || 'built-in mock (page)' }));
+      return res.end(JSON.stringify({ ok: true, provider: provider(), ready: usable(),
+        model: { fal: FAL_MODEL, hf: HF_SPACE, local: `ComfyUI ${LOCAL.unet}` }[provider()] || 'built-in mock (page)',
+        settings: { snap_poses: SNAP_POSES,
+          fal: { image_size: env('FAL_IMAGE_SIZE') || 'square_hd', steps: +(env('FAL_STEPS') || 28), guidance: +(env('FAL_GUIDANCE') || 4.5), lora_scale: +(env('LORA_SCALE') || 1), candidates: CANDIDATES },
+          local: { steps: LOCAL.steps, cfg: LOCAL.cfg, turbo: LOCAL.turbo, megapixels: LOCAL.megapixels, angles_lora: LOCAL.anglesStrength } } }));
     }
     if (url.pathname.startsWith('/api/setup/')) return await setupApi(req, res, url);
     if (url.pathname === '/__panel/setup-panel.js') {

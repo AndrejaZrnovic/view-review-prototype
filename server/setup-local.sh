@@ -30,18 +30,24 @@ cd "$COMFY_DIR"
 [ -f custom_nodes/ComfyUI-GGUF/nodes.py ] || fetch_repo city96/ComfyUI-GGUF custom_nodes/ComfyUI-GGUF
 [ -x .venv/bin/python ] || uv venv --python 3.12 .venv
 uv pip install --python .venv/bin/python torch torchvision torchaudio
-uv pip install --python .venv/bin/python -r requirements.txt -r custom_nodes/ComfyUI-GGUF/requirements.txt "huggingface_hub[hf_xet]"
+uv pip install --python .venv/bin/python -r requirements.txt -r custom_nodes/ComfyUI-GGUF/requirements.txt "huggingface_hub[hf_xet]" hf_transfer
 
 echo "STEP: models"
 HF=.venv/bin/hf
 M=models
+# Anonymous Hub access is throttled and prints the HF_TOKEN warning seen in the log; a free read token makes the same
+# 17-33 GB download much faster. Put HF_TOKEN=... in server/.env, or run `hf auth login` once. Finished files are
+# reused, so an interrupted run continues where it stopped.
+TOK=()
+[ -n "${HF_TOKEN:-}" ] && TOK=(--token "$HF_TOKEN")
+export HF_HUB_ENABLE_HF_TRANSFER=1 # parallel chunks instead of a single stream (hf_transfer is installed above)
 get() { # repo file target_dir
   local name; name=$(basename "$2")
   [ -f "$3/$name" ] && return 0
   echo "Downloading $name"
   mkdir -p "$3"
-  if [ "$name" = "$2" ]; then $HF download "$1" "$2" --local-dir "$3" >/dev/null
-  else tmp="$3/.cache/tmp"; $HF download "$1" "$2" --local-dir "$tmp" >/dev/null; mv "$tmp/$2" "$3/"; rm -rf "$tmp"; fi
+  if [ "$name" = "$2" ]; then $HF download "$1" "$2" --local-dir "$3" ${TOK[@]+"${TOK[@]}"} >/dev/null
+  else tmp="$3/.cache/tmp"; $HF download "$1" "$2" --local-dir "$tmp" ${TOK[@]+"${TOK[@]}"} >/dev/null; mv "$tmp/$2" "$3/"; rm -rf "$tmp"; fi
 }
 get Comfy-Org/Qwen-Image_ComfyUI split_files/vae/qwen_image_vae.safetensors $M/vae
 get fal/Qwen-Image-Edit-2511-Multiple-Angles-LoRA qwen-image-edit-2511-multiple-angles-lora.safetensors $M/loras
@@ -49,8 +55,12 @@ get lightx2v/Qwen-Image-Edit-2511-Lightning Qwen-Image-Edit-2511-Lightning-4step
 get unsloth/Qwen2.5-VL-7B-Instruct-GGUF mmproj-BF16.gguf $M/text_encoders
 # ComfyUI-GGUF finds the vision part by name: it must contain the text encoder's name and "mmproj".
 [ -e $M/text_encoders/Qwen2.5-VL-7B-Instruct-mmproj-BF16.gguf ] || ln -s mmproj-BF16.gguf $M/text_encoders/Qwen2.5-VL-7B-Instruct-mmproj-BF16.gguf
-get unsloth/Qwen2.5-VL-7B-Instruct-GGUF "$CLIP" $M/text_encoders
-get unsloth/Qwen-Image-Edit-2511-GGUF "$UNET" $M/unet
+# The two big files are different repositories, so fetch them at once: the 17-33 GB spends about half its time
+# waiting on the network.
+( get unsloth/Qwen2.5-VL-7B-Instruct-GGUF "$CLIP" $M/text_encoders ) & p1=$!
+( get unsloth/Qwen-Image-Edit-2511-GGUF "$UNET" $M/unet ) & p2=$!
+rc=0; wait $p1 || rc=1; wait $p2 || rc=1
+[ $rc -eq 0 ] || { echo "Model download failed. Check the connection and run setup again; finished files are kept."; exit 1; }
 rm -rf $M/vae/.cache $M/loras/.cache $M/text_encoders/.cache $M/unet/.cache
 echo "STEP: done"
 echo "Local generator ready in $COMFY_DIR"
