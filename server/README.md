@@ -87,6 +87,11 @@ cuts a logo off at its edge, the model completes it with a guess and the guess c
 a made-up word). No prompt wording removed this: show the whole product, or use the preview to reroll. (2) A background
 example that contains a product leaks that product's logo onto yours, so use a photo of the place without products.
 
+(3) Tiny printed text and icons drift a little even when the product is right: on the DSLR back photo the scenes
+(marble, neon, warm desk with a mood photo) kept every button and label, but on the 45° view the LCD's small numbers and
+icons softened (1/8000 read as 1/6000) and the unphotographed side panel was invented. Use sharper, larger photos of
+text-heavy products and check small print by eye.
+
 Each generated view carries the scene key; the video step warns only when the chosen views come from different scenes
 (two scenes with similar wording are no longer mistaken for one). Styled photos are saved in `server/.cache/` (git-ignored).
 
