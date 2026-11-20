@@ -311,29 +311,51 @@ async function viaLocal(p, ref, rel, extras = []) {
 }
 
 /* ---------- style step (moodboard) ---------- */
-// The moodboard sends { environment: [...], mood: [...], images: [dataUrl...] }. The product photo is restyled
-// once (plain edit model, no angle LoRA), cached, and every angle is then generated from the styled photo, so all
-// views share one scene. Extra reference photos are placed "in the same scene as" the styled anchor photo.
-const hasStyle = st => !!st && ((st.environment || []).some(Boolean) || (st.mood || []).some(Boolean) || (st.images || []).length > 0);
+// The moodboard sends { environment: [background text], mood: [mood text], bgImage, moodImage, seed }. The product photo
+// is restyled once (plain edit model, no angle LoRA), cached, and every angle is then generated from the styled photo,
+// so all views share one scene.
+//
+// Qwen-Image-Edit-2511 takes up to three pictures, and which one plays which part has to be spelled out in the prompt:
+//   Picture 1 = the product (always), Picture 2 = the background example, Picture 3 = the mood example.
+// With only one example it is Picture 2, whichever role it has. Older clients sent `images` (all background examples).
+const hasStyle = st => !!st && ((st.environment || []).some(Boolean) || (st.mood || []).some(Boolean) || (st.images || []).length > 0 || !!st.bgImage || !!st.moodImage);
+const styleSeed = st => Number.isInteger(st?.seed) ? Math.abs(st.seed) % 2 ** 31 : 1; // fixed unless the page asks to retry
+function styleRefs(st) {
+  return { bg: st.bgImage || (st.images || [])[0] || null, mood: st.moodImage || null };
+}
+const PRODUCT_LOCK = ' The product must stay exactly as it is in Picture 1: same shape, proportions, colour and colour gradient, materials, finish and every part (lids, handles, buttons, seams). '
+  + 'Reproduce any printing that is already visible on it exactly, and add nothing new: no logo, symbol, text, label, number or pattern that Picture 1 does not show (a blank surface stays blank). '
+  + 'Keep the same camera angle and keep the product the same size and position in the frame. Change only the background, the surface it stands on and the light falling on it. Photorealistic product photograph, sharp focus on the product.';
 function stylePrompt(st, sceneFromStyled) {
   const env = (st.environment || []).filter(Boolean);
   const mood = [...new Set((st.mood || []).join(',').split(',').map(x => x.trim()).filter(Boolean))];
-  const keep = ' Keep the product itself exactly the same: shape, proportions, colours and materials, and every logo, label, printed word, number and barcode already on it in Picture 1. Do not invent new branding, words or labels. Change only the background, surface and lighting. Keep the same camera angle and framing. Photorealistic product photograph, sharp focus on the product.';
-  if (sceneFromStyled) return 'Place the exact product from Picture 1 into the same scene, surface, lighting and colour grading as Picture 2.' + keep;
-  return 'Place the exact product from Picture 1 in a new professional product photo.'
-    + (env.length ? ` Scene: ${env.join('; ')}.` : '') + (mood.length ? ` Mood: ${mood.join(', ')}.` : '')
-    + ((st.images || []).length ? ' Match the setting, lighting and colour palette of Picture 2 without copying any of its objects.' : '') + keep;
+  if (sceneFromStyled) return 'Picture 1 is a product photo from another side. Put exactly that product in the same scene as Picture 2: same background, surface, lighting and colour grading.' + PRODUCT_LOCK;
+  const r = styleRefs(st);
+  let n = 1; const bgN = r.bg ? ++n : 0, moodN = r.mood ? ++n : 0;
+  let p = 'Picture 1 is the real product. Re-photograph exactly this product in a new professional product photo.';
+  if (env.length) p += ` Background and setting: ${env.join('; ')}.`;
+  if (bgN) p += ` Use the location of Picture ${bgN} as the background and surface; copy its setting, not any product or foreground object in it.`;
+  if (mood.length) p += ` Mood and lighting: ${mood.join(', ')}.`;
+  if (moodN) p += ` Take only the lighting, colour palette and atmosphere from Picture ${moodN}; copy none of its objects.`;
+  return p + PRODUCT_LOCK;
 }
-// One plain edit with Qwen-Image-Edit-2511 (no angle LoRA): local ComfyUI or fal.ai. Returns a data URL.
-async function plainEdit(P, image, prompt, scene = null) {
+// One plain edit with Qwen-Image-Edit-2511 (no angle LoRA): local ComfyUI or fal.ai. `extras` are the scene pictures
+// (Picture 2, Picture 3). Returns a data URL.
+async function plainEdit(P, image, prompt, extras = [], seed = 1) {
+  extras = extras.filter(Boolean).slice(0, 2);
   if (P === 'local') {
     await ensureComfy();
-    const img1 = await comfyUpload(image), img2 = scene ? await comfyUpload(scene) : null;
-    return urlToDataUrl(await comfyRun(comfyWorkflow(img1, prompt, Math.floor(Math.random() * 2 ** 31), { angles: false, image2: img2 })));
+    const img1 = await comfyUpload(image), up = await Promise.all(extras.map(comfyUpload));
+    return urlToDataUrl(await comfyRun(comfyWorkflow(img1, prompt, seed, { angles: false, image2: up[0] || null, image3: up[1] || null })));
   }
+  const body = { prompt, image_urls: [image, ...extras], negative_prompt: EXTRA_NEG, output_format: 'png', num_images: 1, seed,
+    num_inference_steps: +(env('FAL_STEPS') || 28), guidance_scale: +(env('FAL_GUIDANCE') || 4.5) };
+  // Without image_size fal keeps the input's own size: a 12 MP phone photo is rendered and billed (per megapixel) at 12 MP.
+  // About 1 MP (the model's working size) with the photo's own proportions keeps the framing and the price.
+  const s = imageSize(image);
+  if (s) { const k = Math.sqrt(1e6 / (s.w * s.h)); body.image_size = { width: Math.max(256, Math.round(s.w * k / 16) * 16), height: Math.max(256, Math.round(s.h * k / 16) * 16) }; }
   const r = await fetch('https://fal.run/fal-ai/qwen-image-edit-2511', {
-    method: 'POST', headers: { Authorization: `Key ${env('FAL_KEY')}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ prompt, image_urls: scene ? [image, scene] : [image], negative_prompt: EXTRA_NEG, output_format: 'png', num_images: 1 }),
+    method: 'POST', headers: { Authorization: `Key ${env('FAL_KEY')}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body),
   });
   const j = await r.json().catch(() => ({}));
   if (!r.ok || !j.images?.[0]?.url) throw new Error(`fal.ai ${r.status}: ${JSON.stringify(j).slice(0, 400)}`);
@@ -344,21 +366,22 @@ async function plainEdit(P, image, prompt, scene = null) {
 const EXTRA_NEG = 'watermark, signature, caption, border, frame, duplicate product, distorted product, blurry';
 
 // Styled photos are cached in memory and on disk (server/.cache, git-ignored), so a set keeps its scene across restarts.
+// The key names the scene (photo + examples + prompt + seed): the page compares it to know whether two views share one.
 const styleCache = new Map();
 const STYLE_DIR = path.join(HERE, '.cache', 'styles');
 const hash = s => crypto.createHash('sha1').update(s).digest('hex');
-async function styleOne(P, image, scene, prompt) {
-  const key = hash([P === 'local' ? 'local:' + LOCAL.unet : P, image, scene || '', prompt].join('|'));
-  if (styleCache.has(key)) return styleCache.get(key);
+async function styleOne(P, image, scenes, prompt, seed) {
+  const key = hash([P === 'local' ? 'local:' + LOCAL.unet : P, image, scenes.filter(Boolean).join('|'), prompt, seed].join('|'));
+  if (styleCache.has(key)) return { image: styleCache.get(key), key };
   const file = path.join(STYLE_DIR, key + '.png');
-  if (fs.existsSync(file)) { const d = 'data:image/png;base64,' + fs.readFileSync(file).toString('base64'); styleCache.set(key, d); return d; }
+  if (fs.existsSync(file)) { const d = 'data:image/png;base64,' + fs.readFileSync(file).toString('base64'); styleCache.set(key, d); return { image: d, key }; }
   const t0 = Date.now();
-  const out = (await guardText(P, await plainEdit(P, image, prompt, scene), [image], { unseen: false })).image;
-  console.log(`[style] ${P} in ${((Date.now() - t0) / 1000).toFixed(1)}s :: ${prompt.slice(0, 120)}…`);
+  const out = (await guardText(P, await plainEdit(P, image, prompt, scenes, seed), [image], { unseen: false })).image;
+  console.log(`[style] ${P} seed=${seed} in ${((Date.now() - t0) / 1000).toFixed(1)}s :: ${prompt.slice(0, 120)}…`);
   try { fs.mkdirSync(STYLE_DIR, { recursive: true }); fs.writeFileSync(file, Buffer.from(out.split(',')[1], 'base64')); } catch {}
   if (styleCache.size > 30) styleCache.delete(styleCache.keys().next().value);
   styleCache.set(key, out);
-  return out;
+  return { image: out, key };
 }
 
 /* ---------- unseen sides ---------- */
@@ -437,15 +460,20 @@ async function guardText(P, image, refs, { unseen = false, scene = null } = {}) 
     console.log(`[text guard] ${Math.round(novel * 100)}% new wording${unseen ? ' on an unphotographed side' : ''} -> cleaning`);
     // Compare against the view this generation actually started from, not whichever photo was uploaded first: an
     // invented word on the back is judged against the back, not against the front.
-    return { image: await plainEdit(P, image, CLEAN_PROMPT, scene || refs[0]), cleaned: true };
+    return { image: await plainEdit(P, image, CLEAN_PROMPT, [scene || refs[0]], 7), cleaned: true };
   } catch (e) { console.error('[text guard]', e.message); return { image, cleaned: false }; }
 }
 
+async function styleAnchor(P, images, st) { // the approved scene: the front photo (or the first) restyled once
+  const anchor = images.find(i => i.side === 'front') || images[0], r = styleRefs(st);
+  const out = await styleOne(P, anchor.image, [r.bg, r.mood], stylePrompt(st, false), styleSeed(st));
+  return { anchor, ...out };
+}
 async function styledReference(P, images, ref, st) {
-  const anchor = images.find(i => i.side === 'front') || images[0];
-  const anchorStyled = await styleOne(P, anchor.image, (st.images || [])[0] || null, stylePrompt(st, false));
-  if (ref.image === anchor.image) return { ...ref, image: anchorStyled };
-  return { ...ref, image: await styleOne(P, ref.image, anchorStyled, stylePrompt(st, true)) };
+  const { anchor, image: anchorStyled, key } = await styleAnchor(P, images, st);
+  if (ref.image === anchor.image) return { ...ref, image: anchorStyled, scene: key };
+  const o = await styleOne(P, ref.image, [anchorStyled], stylePrompt(st, true), styleSeed(st));
+  return { ...ref, image: o.image, scene: key };
 }
 
 /* ---------- helpers ---------- */
@@ -500,7 +528,19 @@ async function generate(p) {
   } catch (e) { lastError = friendly(e.message); throw e; }
   const image = r.url.startsWith('data:') ? r.url : await urlToDataUrl(r.url);
   console.log(`[generate] ${P}${styled ? ' +style' : ''}${cleaned ? ' +clean' : ''}${sameView ? ' +sameview' : ''} az=${q.snap ? snapAz(az) : az} el=${q.snap ? snapEl(q.elevation) : q.elevation} ${q.snap ? 'snapped ' : ''}refs=${1 + extras.length} from ${ref.side} (turn ${Math.round(rel)}) in ${((Date.now() - t0) / 1000).toFixed(1)}s :: ${r.prompt || ''}`);
-  return { image, provider: P, styled, unseen, cleaned, reference: ref.side, relative_turn: Math.round(rel), prompt: r.prompt, seed: r.seed };
+  return { image, provider: P, styled, scene: styled ? ref.scene : '', unseen, cleaned, reference: ref.side, relative_turn: Math.round(rel), prompt: r.prompt, seed: r.seed };
+}
+
+// "Preview scene": the restyled front photo alone, so the page can show the background and mood before any angle is
+// made. Same cache key as generate() uses, so approving the preview makes every later view free of a second restyle.
+async function previewStyle(p) {
+  if (!Array.isArray(p.images) || !p.images.length) throw new Error('Upload a product photo first.');
+  if (!hasStyle(p.style)) throw new Error('Describe a background or mood, or add an example image.');
+  const P = provider();
+  if (!usable(P) || P === 'hf') throw new Error('Previewing a scene needs the Local or Cloud (fal.ai) generator: set one up in the panel at the top of the page.');
+  const t0 = Date.now(), { image, key } = await styleAnchor(P, p.images, p.style);
+  lastError = ''; lastSecs = Math.round((Date.now() - t0) / 1000);
+  return { image, scene: key, seed: styleSeed(p.style), provider: P };
 }
 
 /* ---------- transition video (fal.ai Veo 3.1 first/last frame) ---------- */
@@ -510,8 +550,9 @@ const VIDEO_MODELS = { fast: 'fal-ai/veo3.1/fast/first-last-frame-to-video', bes
 const VIDEO_RATE = { fast: 0.10, best: 0.20 }; // USD per second at 720p/1080p without audio
 const VIDEO_DIR = path.join(HERE, '.cache', 'videos');
 const VIDEOS = new Map(); // id -> job
+// No "logo" or "label" words here: a negative prompt strips the real artwork along with the invented (see EXTRA_NEG).
 const VIDEO_NEG = 'cuts, scene change, morphing product, warping, melting, deforming, wobbling, stretching, bending, rearranging parts, '
-  + 'changing shape, changing colour, extra objects, people, hands, new text, new logos, labels changing, watermark, flicker, shaky camera, fast motion';
+  + 'changing shape, changing colour, extra objects, people, hands, watermark, flicker, shaky camera, fast motion';
 
 async function falQueue(model, input, onStatus) {
   const H = { Authorization: `Key ${env('FAL_KEY')}`, 'Content-Type': 'application/json' };
@@ -595,11 +636,14 @@ function startVideo(p) {
     // (typewriter keys, a mechanism) therefore warp. Report the largest step so the page and the log can warn.
     job.maxTurn = Math.round(Math.max(0, ...pairs.map(([a, b]) => Math.abs(((b.az - a.az) % 360 + 540) % 360 - 180))));
     if (job.maxTurn > 90) console.log(`[video] largest move is ${job.maxTurn}°: the model must invent the geometry in between, which warps complex products`);
+    // One seed for every clip of the job: clips that share a view must agree on grade and lighting at the seam, and a
+    // seed is reproducible if one clip has to be redone.
+    const seed = Math.floor(Math.random() * 2 ** 31);
     const urls = await Promise.all(pairs.map(([a, b]) => {
       let seen = false;
       return falQueue(VIDEO_MODELS[quality], {
         prompt: videoPrompt(a, b), negative_prompt: VIDEO_NEG, first_frame_url: a.image, last_frame_url: b.image,
-        duration: dur, resolution: '1080p', aspect_ratio: aspect, generate_audio: false,
+        duration: dur, resolution: '1080p', aspect_ratio: aspect, generate_audio: false, seed,
       }, s => { if (s === 'IN_PROGRESS' && !seen) { seen = true; job.started++; } }).then(u => { job.done++; return u; });
     }));
     const url = urls.length > 1 ? await falQueue('fal-ai/ffmpeg-api/merge-videos', { video_urls: urls }) : urls[0];
@@ -725,6 +769,13 @@ const server = http.createServer(async (req, res) => {
       const out = await generate(JSON.parse(await readBody(req)));
       res.writeHead(200, { 'Content-Type': 'application/json' });
       return res.end(JSON.stringify(out));
+    }
+    if (url.pathname === '/api/style' && req.method === 'POST') {
+      if (req.headers['x-view-review'] !== '1') { res.writeHead(403, { 'Content-Type': 'application/json' }); return res.end('{"error":"Forbidden"}'); } // paid: same-page only
+      try {
+        const out = await previewStyle(JSON.parse(await readBody(req)));
+        res.writeHead(200, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify(out));
+      } catch (e) { lastError = friendly(e.message); res.writeHead(400, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ error: friendly(e.message) })); }
     }
     if (url.pathname === '/api/video' && req.method === 'POST') {
       res.setHeader('Content-Type', 'application/json');

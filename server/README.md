@@ -53,21 +53,37 @@ The choice is saved as `LOCAL_MODEL` (best / balanced / small) in `server/.env`.
 `LOCAL_MEGAPIXELS`. `bash server/setup-local.sh`
 runs the same install from a terminal.
 
-## Moodboard styles
+## Scene and mood (moodboard)
 
-When a style is applied on the Make page (**2. Style moodboard → Apply Style**), each request carries the
-selected tiles' scene and mood descriptions, plus any image you uploaded with **Add your own image**.
-The server then works in two steps:
+Step 2 on the Make page describes the shot for this product with two parts, each optional and editable at any time:
+
+- **Background of the shot**: words and/or one example image (a location photo).
+- **Mood and lighting**: words and/or one example image (a mood photo).
+
+The presets are only a quick start: clicking one fills in the words, which you then change. Example images are shrunk
+to 1280 px in the browser and can be replaced or removed.
+
+**Preview scene** restyles the front photo once (`POST /api/style`) and shows it before any angle is made. If the
+product changed (shape, colour, a logo that was not there), press **Try another look** (new seed) or edit the words.
+**Use this scene** locks it. Every angle is then generated from that approved photo, so all views share one scene, and
+the cached photo is reused (no second restyle is paid for). Changing the words, an example or the product photo
+invalidates the preview.
+
+How the model is told what is what: Qwen-Image-Edit-2511 accepts up to three pictures, so the prompt names them:
+Picture 1 = the product, Picture 2 = the background example, Picture 3 = the mood example (with only one example it is
+Picture 2). The background example supplies the location only; the mood example supplies lighting, palette and
+atmosphere only; "copy none of its objects" is in the prompt. The product-lock text forbids adding any logo, symbol, text
+or pattern the photo does not show (a plain bottle stays plain), keeps the camera angle and framing, and changes only the
+background, the surface and the light.
 
 1. **Style:** the front photo (or the first one uploaded) is restyled with the plain Qwen-Image-Edit-2511 model,
-   without the angle add-on: same product, new background, surface and lighting. An uploaded style image goes in as a
-   second reference. Any other photo used for an angle is placed "in the same scene as" that styled front photo.
-   Styled photos are cached, so this runs once per style.
+   without the angle add-on. Any other photo used for an angle is placed "in the same scene as" that styled front photo.
+   Styled photos are cached by scene (photo + examples + prompt + seed), so this runs once per scene.
 2. **Angle:** the usual camera step runs on the styled photo. If the requested view equals the photo's own angle,
    the styled photo is returned as-is.
 
-So all views of a set share one scene. Styled photos are also saved in `server/.cache/` (git-ignored), so the
-scene survives a restart.
+Each generated view carries the scene key; the video step warns only when the chosen views come from different scenes
+(two scenes with similar wording are no longer mistaken for one). Styled photos are saved in `server/.cache/` (git-ignored).
 
 **Invented text guard (fal.ai key needed):** after every style and angle step, the result is read with fal.ai's free
 Florence-2 OCR. The guard only exists for the model inventing a brand name on a side nobody photographed, so it is
@@ -131,6 +147,11 @@ driven by the prompt `<sks> [azimuth] [elevation] [distance]`, in that order. Th
 | `num_inference_steps` (fal) | 28 | Endpoint default and the trained sampling regime. |
 | `lora_scale` (fal) | 1 (`LORA_SCALE`) | Card recommends 0.8-1.0. Lower holds the product closer to the photo, higher follows the camera more literally. |
 | `image_size` (fal) | `square_hd` = 1 MP | 1 MP is the training size and the price unit ($0.035). Without it fal keeps the input's own dimensions, so a 12 MP phone photo is billed about 12x and rendered far above what the LoRA learned. |
+| Restyle `image_size` (fal) | ~1 MP, the photo's own proportions | The plain edit endpoint keeps the input's size by default, so a 12 MP photo was rendered and billed at 12 MP. Not `square_hd`: that would reframe a portrait shot. |
+| Restyle seed | `style.seed` from the page (default 1) | Same seed + same inputs = same scene, so an approved scene reproduces; **Try another look** bumps it. Also part of the cache key. |
+| Restyle pictures | 1 product + background example + mood example | Roles are named in the prompt (see Scene and mood). Local ComfyUI passes all three; before this only one example was ever used. |
+| Video seed | one random seed per job, shared by every clip | Veo's first/last-frame endpoint accepts `seed`; clips that meet at a shared view then agree on grade and light. |
+| Video negative prompt | motion/warp words only | "logo" and "label" words were removed: a negative prompt strips real artwork along with invented (same reason as `EXTRA_NEG`). |
 | Local steps / CFG | 4 / 1 (turbo) or 20+ / 4 (`LOCAL_STEPS`) | Turbo is the 4-step Lightning distillation: fast, softer. Above 8 steps the Lightning LoRA is skipped and the full model runs at CFG 4, which is what sharpens fine print. |
 | Local megapixels | 1.0 with 40 GB+, 0.8 at 24 GB+, 0.6 below | 1 MP is the training size; 0.6 softens small text such as a nutrition panel. |
 | Local angles LoRA | 0.9 (`LOCAL_LORA`) | Card says 0.8-1.0, start at 0.9. |
