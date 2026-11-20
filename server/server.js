@@ -325,7 +325,7 @@ function styleRefs(st) {
 }
 const PRODUCT_LOCK = ' The product must stay exactly as it is in Picture 1: same shape, proportions, colour and colour gradient, materials, finish and every part (lids, handles, buttons, seams). '
   + 'Reproduce any printing that is already visible on it exactly, and add nothing new: no logo, symbol, text, label, number or pattern that Picture 1 does not show (a blank surface stays blank). '
-  + 'Keep the same camera angle and keep the product the same size and position in the frame. Change only the background, the surface it stands on and the light falling on it. Photorealistic product photograph, sharp focus on the product.';
+  + 'Keep the same camera angle and the same framing and crop as Picture 1: where the edge of the photo cuts the product off, it stays cut off in the same place. Never extend the product past the photo edge and never complete a logo, text or pattern that is only partly visible; show only what Picture 1 shows. Change only the background, the surface it stands on and the light falling on it. Photorealistic product photograph, sharp focus on the product.';
 function stylePrompt(st, sceneFromStyled) {
   const env = (st.environment || []).filter(Boolean);
   const mood = [...new Set((st.mood || []).join(',').split(',').map(x => x.trim()).filter(Boolean))];
@@ -334,7 +334,7 @@ function stylePrompt(st, sceneFromStyled) {
   let n = 1; const bgN = r.bg ? ++n : 0, moodN = r.mood ? ++n : 0;
   let p = 'Picture 1 is the real product. Re-photograph exactly this product in a new professional product photo.';
   if (env.length) p += ` Background and setting: ${env.join('; ')}.`;
-  if (bgN) p += ` Use the location of Picture ${bgN} as the background and surface; copy its setting, not any product or foreground object in it.`;
+  if (bgN) p += ` Use the location of Picture ${bgN} as the background and surface; copy its setting only. Ignore any product, bottle, logo, symbol or text visible in Picture ${bgN}: none of it belongs on the product.`;
   if (mood.length) p += ` Mood and lighting: ${mood.join(', ')}.`;
   if (moodN) p += ` Take only the lighting, colour palette and atmosphere from Picture ${moodN}; copy none of its objects.`;
   return p + PRODUCT_LOCK;

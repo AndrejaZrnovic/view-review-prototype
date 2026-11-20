@@ -82,6 +82,11 @@ background, the surface and the light.
 2. **Angle:** the usual camera step runs on the styled photo. If the requested view equals the photo's own angle,
    the styled photo is returned as-is.
 
+**Limits seen in live tests (fal, `original-blue-bottle.jpg`):** the scene itself holds across angles, but (1) if the photo
+cuts a logo off at its edge, the model completes it with a guess and the guess changes on every run (a swirl, a caret,
+a made-up word). No prompt wording removed this: show the whole product, or use the preview to reroll. (2) A background
+example that contains a product leaks that product's logo onto yours, so use a photo of the place without products.
+
 Each generated view carries the scene key; the video step warns only when the chosen views come from different scenes
 (two scenes with similar wording are no longer mistaken for one). Styled photos are saved in `server/.cache/` (git-ignored).
 
