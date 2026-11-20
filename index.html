@@ -353,7 +353,7 @@ function keepParts(){var sq=vSeq().map(function(x){return M.gen.indexOf(x)});
  return {imgs:M.imgs,gen:M.gen,mood:{sel:M.mood.sel,applied:M.mood.applied,f:M.mood.f,bg:M.mood.bg,md:M.mood.md,bgImg:M.mood.bgImg,mdImg:M.mood.mdImg,seed:M.mood.seed,prev:M.mood.prev},
   meta:{v:1,onMake:S.step==='mk',sheet:M.sheet,az:M.az,el:M.el,dist:M.dist,roll:M.roll,lens:M.lens,snap:M.snap,pe:M.pe,prompt:M.prompt,
    video:{seq:sq,quality:V.quality,dur:V.dur,aspect:V.aspect,loop:V.loop,job:V.job&&V.job.id?V.job:null}}}}
-function keepSig(k,v){if(k==='meta')return JSON.stringify(v);if(k==='mood')return JSON.stringify([v.sel,v.applied,v.f,v.bg,v.md,v.bgImg.length,v.mdImg.length,v.seed,v.prev?v.prev.scene+v.prev.sig:'']);
+function keepSig(k,v){if(k==='meta')return JSON.stringify(v);if(k==='mood')return JSON.stringify([v.sel,v.applied,v.f,v.bg||'',v.md||'',(v.bgImg||'').length,(v.mdImg||'').length,v.seed||1,v.prev?v.prev.scene+v.prev.sig:'']);
  return v.map(function(x){return [x.side,x.name,(x.data||x.img||'').length,x.az,x.el,x.dist,x.style,x.unseen,x.cleaned].join('|')}).join('/')}
 function keepNow(){if(!KEEP.ready)return;var P=keepParts();try{kvDo('readwrite',function(st){for(var k in P){var g=keepSig(k,P[k]);if(KEEP.sig[k]!==g){KEEP.sig[k]=g;st.put(P[k],k)}}}).catch(function(){})}catch(x){}}
 function keepSoon(){clearTimeout(KEEP.t);KEEP.t=setTimeout(keepNow,300)}
@@ -361,6 +361,7 @@ function keepLoad(){var out={};return kvDo('readonly',function(st){['imgs','gen'
  if(out.imgs)M.imgs=out.imgs;if(out.gen)M.gen=out.gen;
  if(out.mood){var om=out.mood,mo=M.mood;mo.sel=om.sel||[];mo.applied=!!om.applied;mo.f=om.f||'All';mo.bg=om.bg||'';mo.md=om.md||'';mo.bgImg=om.bgImg||'';mo.mdImg=om.mdImg||'';mo.seed=om.seed||1;mo.prev=om.prev||null;
   if(om.custom&&om.custom.length&&!mo.bgImg){mo.bgImg=om.custom[0].img;if(mo.applied&&mo.sel.length)mo.sel=[]} /* older saves kept uploaded examples as tiles */
+  if(!mo.bg&&!mo.md&&!mo.bgImg&&!mo.mdImg&&mo.sel.length){var pt0=TILES.filter(function(t){return t.id===mo.sel[0]})[0];if(pt0){mo.bg=pt0.env;mo.md=pt0.mood}} /* older saves kept only a preset tile */
   if(mo.applied&&!hasScene())mo.applied=false}
  var m=out.meta;if(m){['sheet','az','el','dist','roll','lens','snap','pe','prompt'].forEach(function(k){if(m[k]!==undefined)M[k]=m[k]});
   var vv=m.video||{};V.seq=(vv.seq||[]).map(function(i){return M.gen[i]}).filter(Boolean);['quality','dur','aspect','loop'].forEach(function(k){if(vv[k]!==undefined)V[k]=vv[k]});
