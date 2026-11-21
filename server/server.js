@@ -325,7 +325,7 @@ function styleRefs(st) {
 }
 const PRODUCT_LOCK = ' The product must stay exactly as it is in Picture 1: same shape, proportions, colour and colour gradient, materials, finish and every part (lids, handles, buttons, seams). '
   + 'Reproduce any printing that is already visible on it exactly, and add nothing new: no logo, symbol, text, label, number or pattern that Picture 1 does not show (a blank surface stays blank). '
-  + 'Keep the same camera angle and the same framing and crop as Picture 1: where the edge of the photo cuts the product off, it stays cut off in the same place. Never extend the product past the photo edge and never complete a logo, text or pattern that is only partly visible; show only what Picture 1 shows. Change only the background, the surface it stands on and the light falling on it. Photorealistic product photograph, sharp focus on the product.';
+  + 'Keep the same camera angle and the same framing and crop as Picture 1: where the edge of the photo cuts the product off, it stays cut off in the same place. Never extend the product past the photo edge and never complete a logo, text or pattern that is only partly visible; show only what Picture 1 shows. Change only the background, the surface it stands on and the light falling on it. Do not add props or other objects on the surface. Photorealistic product photograph, sharp focus on the product.';
 function stylePrompt(st, sceneFromStyled) {
   const env = (st.environment || []).filter(Boolean);
   const mood = [...new Set((st.mood || []).join(',').split(',').map(x => x.trim()).filter(Boolean))];
@@ -339,7 +339,19 @@ function stylePrompt(st, sceneFromStyled) {
   if (moodN) p += ` Take only the lighting, colour palette and atmosphere from Picture ${moodN}; copy none of its objects.`;
   return p + PRODUCT_LOCK;
 }
-// One plain edit with Qwen-Image-Edit-2511 (no angle LoRA): local ComfyUI or fal.ai. `extras` are the scene pictures
+// Restyle model on fal. Qwen Image 3 edit kept small printed text and lid/handle details far better than 2511 in side by
+// side tests (LCD icons and numbers came back exact where 2511 garbled them), for $0.04 instead of $0.03. It cannot do the
+// angle step (that is the 2511 LoRA). Limits per the fal page: 1-3 images, 384-2048 px each side, no alpha, 10 MB each;
+// anything outside falls back to 2511. FAL_STYLE_MODEL=fal-ai/qwen-image-edit-2511 in server/.env restores the old model.
+const STYLE_MODEL = env('FAL_STYLE_MODEL') || 'alibaba/qwen-image-3/edit';
+const q3Accepts = images => images.every(d => {
+  const s = imageSize(d);
+  if (!s || s.w < 384 || s.h < 384 || s.w > 2048 || s.h > 2048 || d.length > 13e6) return false;
+  const b = Buffer.from(d.slice(d.indexOf(',') + 1, d.indexOf(',') + 65), 'base64');
+  return !(b.readUInt32BE(0) === 0x89504e47 && (b[25] === 4 || b[25] === 6)); // PNG with an alpha channel
+});
+const falStyleModel = images => STYLE_MODEL.includes('qwen-image-3') && !q3Accepts(images) ? 'fal-ai/qwen-image-edit-2511' : STYLE_MODEL;
+// One plain edit with Qwen-Image-Edit-2511 or Qwen Image 3 (no angle LoRA): local ComfyUI or fal.ai. `extras` are the scene pictures
 // (Picture 2, Picture 3). Returns a data URL.
 async function plainEdit(P, image, prompt, extras = [], seed = 1) {
   extras = extras.filter(Boolean).slice(0, 2);
@@ -348,13 +360,17 @@ async function plainEdit(P, image, prompt, extras = [], seed = 1) {
     const img1 = await comfyUpload(image), up = await Promise.all(extras.map(comfyUpload));
     return urlToDataUrl(await comfyRun(comfyWorkflow(img1, prompt, seed, { angles: false, image2: up[0] || null, image3: up[1] || null })));
   }
-  const body = { prompt, image_urls: [image, ...extras], negative_prompt: EXTRA_NEG, output_format: 'png', num_images: 1, seed,
-    num_inference_steps: +(env('FAL_STEPS') || 28), guidance_scale: +(env('FAL_GUIDANCE') || 4.5) };
+  const model = falStyleModel([image, ...extras]), q3 = model.includes('qwen-image-3');
+  const body = q3
+    // Qwen Image 3 names its pictures "image N" and rewrites prompts with an LLM unless told not to: off, so the product lock is read as written.
+    ? { prompt: prompt.replace(/Picture (\d)/g, 'image $1'), image_urls: [image, ...extras], negative_prompt: EXTRA_NEG, output_format: 'png', num_images: 1, seed, enable_prompt_expansion: false }
+    : { prompt, image_urls: [image, ...extras], negative_prompt: EXTRA_NEG, output_format: 'png', num_images: 1, seed,
+        num_inference_steps: +(env('FAL_STEPS') || 28), guidance_scale: +(env('FAL_GUIDANCE') || 4.5) };
   // Without image_size fal keeps the input's own size: a 12 MP phone photo is rendered and billed (per megapixel) at 12 MP.
   // About 1 MP (the model's working size) with the photo's own proportions keeps the framing and the price.
   const s = imageSize(image);
-  if (s) { const k = Math.sqrt(1e6 / (s.w * s.h)); body.image_size = { width: Math.max(256, Math.round(s.w * k / 16) * 16), height: Math.max(256, Math.round(s.h * k / 16) * 16) }; }
-  const r = await fetch('https://fal.run/fal-ai/qwen-image-edit-2511', {
+  if (s) { const k = Math.sqrt(1e6 / (s.w * s.h)); body.image_size = { width: Math.max(512, Math.round(s.w * k / 16) * 16), height: Math.max(512, Math.round(s.h * k / 16) * 16) }; }
+  const r = await fetch(`https://fal.run/${model}`, {
     method: 'POST', headers: { Authorization: `Key ${env('FAL_KEY')}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body),
   });
   const j = await r.json().catch(() => ({}));
@@ -371,13 +387,13 @@ const styleCache = new Map();
 const STYLE_DIR = path.join(HERE, '.cache', 'styles');
 const hash = s => crypto.createHash('sha1').update(s).digest('hex');
 async function styleOne(P, image, scenes, prompt, seed) {
-  const key = hash([P === 'local' ? 'local:' + LOCAL.unet : P, image, scenes.filter(Boolean).join('|'), prompt, seed].join('|'));
+  const key = hash([P === 'local' ? 'local:' + LOCAL.unet : P === 'fal' ? 'fal:' + falStyleModel([image, ...scenes.filter(Boolean)]) : P, image, scenes.filter(Boolean).join('|'), prompt, seed].join('|'));
   if (styleCache.has(key)) return { image: styleCache.get(key), key };
   const file = path.join(STYLE_DIR, key + '.png');
   if (fs.existsSync(file)) { const d = 'data:image/png;base64,' + fs.readFileSync(file).toString('base64'); styleCache.set(key, d); return { image: d, key }; }
   const t0 = Date.now();
   const out = (await guardText(P, await plainEdit(P, image, prompt, scenes, seed), [image], { unseen: false })).image;
-  console.log(`[style] ${P} seed=${seed} in ${((Date.now() - t0) / 1000).toFixed(1)}s :: ${prompt.slice(0, 120)}…`);
+  console.log(`[style] ${P}${P === 'fal' ? ' ' + falStyleModel([image, ...scenes.filter(Boolean)]) : ''} seed=${seed} in ${((Date.now() - t0) / 1000).toFixed(1)}s :: ${prompt.slice(0, 120)}…`);
   try { fs.mkdirSync(STYLE_DIR, { recursive: true }); fs.writeFileSync(file, Buffer.from(out.split(',')[1], 'base64')); } catch {}
   if (styleCache.size > 30) styleCache.delete(styleCache.keys().next().value);
   styleCache.set(key, out);
@@ -756,7 +772,7 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       return res.end(JSON.stringify({ ok: true, provider: provider(), ready: usable(),
         model: { fal: FAL_MODEL, hf: HF_SPACE, local: `ComfyUI ${LOCAL.unet}` }[provider()] || 'built-in mock (page)',
-        settings: { snap_poses: SNAP_POSES,
+        settings: { snap_poses: SNAP_POSES, style_model: STYLE_MODEL,
           fal: { image_size: env('FAL_IMAGE_SIZE') || 'square_hd', steps: +(env('FAL_STEPS') || 28), guidance: +(env('FAL_GUIDANCE') || 4.5), lora_scale: +(env('LORA_SCALE') || 1), candidates: CANDIDATES },
           local: { steps: LOCAL.steps, cfg: LOCAL.cfg, turbo: LOCAL.turbo, megapixels: LOCAL.megapixels, angles_lora: LOCAL.anglesStrength } } }));
     }

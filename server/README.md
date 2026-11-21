@@ -92,6 +92,14 @@ example that contains a product leaks that product's logo onto yours, so use a p
 icons softened (1/8000 read as 1/6000) and the unphotographed side panel was invented. Use sharper, larger photos of
 text-heavy products and check small print by eye.
 
+(4) The restyle sometimes decorates the surface with props (an ink jar, a box). They are then identical in every view and
+in the video because the scene is locked; a "no extra props" line was added to the prompt but not yet tested.
+
+**Full-flow run (real fal, through the page):** typewriter photo + background example + mood example + words -> Preview
+scene (Qwen Image 3, 60 s, ~$0.04) -> Use this scene -> Front view (free: the approved scene is the front view) and
+a 45° view (same scene key) -> Fast 4 s 16:9 video (1 clip, 109 s, about $0.48 including the frame extension): 1920x1080,
+one smooth orbit, product solid, no cuts. The page warned about different scenes only when scene keys differed.
+
 Each generated view carries the scene key; the video step warns only when the chosen views come from different scenes
 (two scenes with similar wording are no longer mistaken for one). Styled photos are saved in `server/.cache/` (git-ignored).
 
@@ -157,6 +165,7 @@ driven by the prompt `<sks> [azimuth] [elevation] [distance]`, in that order. Th
 | `num_inference_steps` (fal) | 28 | Endpoint default and the trained sampling regime. |
 | `lora_scale` (fal) | 1 (`LORA_SCALE`) | Card recommends 0.8-1.0. Lower holds the product closer to the photo, higher follows the camera more literally. |
 | `image_size` (fal) | `square_hd` = 1 MP | 1 MP is the training size and the price unit ($0.035). Without it fal keeps the input's own dimensions, so a 12 MP phone photo is billed about 12x and rendered far above what the LoRA learned. |
+| Restyle model (fal) | `alibaba/qwen-image-3/edit` ($0.04, ~30-60 s), 2511 as fallback (`FAL_STYLE_MODEL` to change) | In side-by-side runs it kept small printed text and lid/handle details that 2511 garbled (DSLR LCD icons and numbers exact; typewriter keys intact where 2511 covered them in glow). Prompt expansion is turned off so the product lock is read as written. It cannot do angles (that is the 2511 LoRA). Falls back to 2511 for an image under 384 or over 2048 px, with alpha, over 10 MB, or not JPEG/PNG; the page scales larger product photos down to 2048 px on upload. |
 | Restyle `image_size` (fal) | ~1 MP, the photo's own proportions | The plain edit endpoint keeps the input's size by default, so a 12 MP photo was rendered and billed at 12 MP. Not `square_hd`: that would reframe a portrait shot. |
 | Restyle seed | `style.seed` from the page (default 1) | Same seed + same inputs = same scene, so an approved scene reproduces; **Try another look** bumps it. Also part of the cache key. |
 | Restyle pictures | 1 product + background example + mood example | Roles are named in the prompt (see Scene and mood). Local ComfyUI passes all three; before this only one example was ever used. |

@@ -421,7 +421,7 @@ function mdSig(){var m=M.mood,f=refs()[0];return JSON.stringify([m.bg.trim(),m.m
 function prevOk(){return !!(M.mood.prev&&M.mood.prev.sig===mdSig())}
 function mdElapsed(){var t=M.mood.busy?Math.floor((Date.now()-M.mood.busyT)/1000):0;return Math.floor(t/60)+':'+String(t%60).padStart(2,'0')}
 setInterval(function(){if(!M.mood.busy)return;var s=mdElapsed();Array.prototype.forEach.call(document.querySelectorAll('.melapsed'),function(e){e.textContent=s})},1000);
-function shrinkImg(file,cb){var r=new FileReader();r.onload=function(){var im=new Image();im.onload=function(){var k=Math.min(1,1280/Math.max(im.width,im.height)),c=document.createElement('canvas');c.width=Math.max(1,Math.round(im.width*k));c.height=Math.max(1,Math.round(im.height*k));c.getContext('2d').drawImage(im,0,0,c.width,c.height);cb(c.toDataURL('image/jpeg',.9))};im.onerror=function(){cb(r.result)};im.src=r.result};r.readAsDataURL(file)}
+function shrinkImg(file,cb,max,keep){var r=new FileReader();r.onload=function(){var im=new Image();im.onload=function(){var mx=Math.max(im.width,im.height),mn=Math.min(im.width,im.height),k=Math.min(1,(max||1280)/mx);k=Math.min(Math.max(k,Math.min(1,384/mn)),2048/mx); /* never shrink the short side under 384 px: the restyle model refuses smaller */if(keep&&k===1){cb(r.result);return}var c=document.createElement('canvas');c.width=Math.max(1,Math.round(im.width*k));c.height=Math.max(1,Math.round(im.height*k));c.getContext('2d').drawImage(im,0,0,c.width,c.height);cb(c.toDataURL('image/jpeg',.9))};im.onerror=function(){cb(r.result)};im.src=r.result};r.readAsDataURL(file)}
 /* Show the restyled front photo before any angle is made: Apply used to flip a flag and show nothing until a paid view. */
 function mdPreview(){var m=M.mood;if(m.busy||!hasScene()||!M.imgs.length||!BACKEND)return;m.busy=true;m.busyT=Date.now();m.err='';var sig=mdSig();render();
  fetch(BACKEND+'/style',{method:'POST',headers:{'Content-Type':'application/json','X-View-Review':'1'},body:JSON.stringify({images:refs().map(function(i){return {side:i.side,image:i.data}}),style:styleInfo()})})
@@ -461,7 +461,7 @@ document.addEventListener('change',function(e){var t=e.target,d=t.dataset||{};
  else if(d.f==='src'){CFG.views[+d.i].src=t.value;render()}
  else if(d.f==='err'){CFG.views[+d.i].err=t.checked;render()}
  else if(d.mood){var mf=t.files&&t.files[0];if(!mf)return;shrinkImg(mf,function(u){M.mood[d.mood+'Img']=u;M.mood.prev=null;M.mood.err='';render()})}
- else if(d.side){var fl=t.files&&t.files[0];if(!fl)return;var rd=new FileReader();rd.onload=function(){setSide(d.side,rd.result,fl.name);render()};rd.readAsDataURL(fl)}
+ else if(d.side){var fl=t.files&&t.files[0];if(!fl)return;shrinkImg(fl,function(u){setSide(d.side,u,fl.name);render()},2048,true)} /* the restyle model takes at most 2048 px a side; smaller photos are kept as uploaded */
  else if(t.id==='mkfile'){Array.prototype.slice.call(t.files).slice(0,Math.max(0,3-M.imgs.length)).forEach(function(f){var r=new FileReader();r.onload=function(){M.imgs.push({name:f.name,data:r.result});render()};r.readAsDataURL(f)})}
  else if(d.a==='ovsel'){S.ovIdx=+t.value;log('overlay_ref',{ref:t.value});render()}
  else if(d.a==='ov'){log('overlay_drag',{view:S.cmp,pos:+t.value})}
